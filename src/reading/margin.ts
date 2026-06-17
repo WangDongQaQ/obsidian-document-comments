@@ -1,0 +1,381 @@
+import { App, MarkdownView, Notice, setIcon } from "obsidian";
+import { ParsedComment } from "../format/types";
+import { existingIds, parseComments } from "../format/parse";
+import { generateId } from "../format/ids";
+import { Card, CardCallbacks, cardSignature } from "../ui/card";
+import {
+	Change,
+	applyChanges,
+	computeAddComment,
+	computeAppendReply,
+	computeDeleteComment,
+	computeDeleteEntry,
+	computeEditEntry,
+	computeSetResolved,
+	computeToggleReaction,
+} from "../editor/edits";
+import { cssEscape } from "../util/css";
+
+const CARD_GAP = 8;
+const ORPHAN_TOP = 8;
+
+export type ReadingDeps = {
+	app: App;
+	getAuthor: () => string;
+	showComments: () => boolean;
+	showResolved: () => boolean;
+	/** While the sidebar panel is open, the inline column steps aside. */
+	sidebarOpen: () => boolean;
+};
+
+/** A margin column for one reading-view container, aligned to highlight spans. */
+class ReadingMargin {
+	private container: HTMLElement;
+	private scroller: HTMLElement;
+	private cards = new Map<string, Card>();
+	private comments: ParsedComment[] = [];
+	private activeId: string | null = null;
+	private draft: { from: number; to: number } | null = null;
+	private draftEl: HTMLElement | null = null;
+	private draftAnchor: HTMLElement | null = null;
+	private cb: CardCallbacks;
+	private scrollHandler = () => this.position();
+	private resizeObserver: ResizeObserver;
+
+	constructor(
+		private readingView: HTMLElement,
+		private view: MarkdownView,
+		private deps: ReadingDeps,
+	) {
+		this.container = readingView.createDiv("doc-comment-margin");
+		this.scroller = (readingView.querySelector(".markdown-preview-view") as HTMLElement) ?? readingView;
+		this.cb = {
+			getAuthor: () => deps.getAuthor(),
+			onHover: (id, active) => this.setActive(active ? id : null),
+			onClickAnchor: (id) => this.scrollToAnchor(id),
+			onResize: () => this.position(),
+			reply: (id, text) =>
+				void this.edit((doc) =>
+					computeAppendReply(doc, id, {
+						createdAt: new Date().toISOString(),
+						author: deps.getAuthor(),
+						text,
+					}),
+				),
+			setResolved: (id, resolved) => void this.edit((doc) => computeSetResolved(doc, id, resolved)),
+			remove: (id) => void this.edit((doc) => computeDeleteComment(doc, id)),
+			editEntry: (id, index, text) => void this.edit((doc) => computeEditEntry(doc, id, index, text)),
+			deleteEntry: (id, index) => void this.edit((doc) => computeDeleteEntry(doc, id, index)),
+			toggleReaction: (id, emoji) =>
+				void this.edit((doc) => computeToggleReaction(doc, id, emoji, deps.getAuthor())),
+		};
+
+		this.scroller.addEventListener("scroll", this.scrollHandler, { passive: true });
+		this.resizeObserver = new ResizeObserver(() => this.position());
+		this.resizeObserver.observe(this.scroller);
+		this.readingView.addEventListener("mouseover", this.onMouseOver);
+		this.readingView.addEventListener("mouseout", this.onMouseOut);
+		this.readingView.addEventListener("mousedown", this.onMouseDown);
+	}
+
+	async refresh(text?: string): Promise<void> {
+		const file = this.view.file;
+		if (!file) return;
+		let data: string;
+		try {
+			// Use the caller's just-written content if given; otherwise read fresh (NOT
+			// cachedRead, which can lag right after a write and show stale state).
+			data = text ?? (await this.deps.app.vault.read(file));
+		} catch {
+			return; // file vanished or unreadable — keep the last render
+		}
+		const all = parseComments(data).filter((c) => c.body);
+		// Sidebar open → inline cards step aside (the panel lists them instead).
+		this.comments = this.deps.showComments() && !this.deps.sidebarOpen() ? all : [];
+		this.reconcileCards();
+		this.position();
+	}
+
+	private async edit(compute: (doc: string) => Change[] | null): Promise<void> {
+		const file = this.view.file;
+		if (!file) return;
+		try {
+			const newData = await this.deps.app.vault.process(file, (data) => {
+				const changes = compute(data);
+				return changes ? applyChanges(data, changes) : data;
+			});
+			await this.refresh(newData);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "unknown error";
+			new Notice(`Couldn't save the comment: ${message}`);
+		}
+	}
+
+	private reconcileCards(): void {
+		const present = new Set(this.comments.map((c) => c.id));
+		for (const [id, card] of this.cards) {
+			if (!present.has(id)) {
+				card.el.remove();
+				this.cards.delete(id);
+				if (this.activeId === id) this.activeId = null;
+			}
+		}
+		for (const c of this.comments) {
+			const existing = this.cards.get(c.id);
+			if (!existing) {
+				const card = new Card(c, this.cb);
+				this.cards.set(c.id, card);
+				this.container.appendChild(card.el);
+			} else if (existing.signature !== cardSignature(c)) {
+				existing.update(c);
+			}
+		}
+		this.container.toggleClass("dc-hide-resolved", !this.deps.showResolved());
+	}
+
+	private position(): void {
+		this.container.toggleClass("dc-has", this.comments.length > 0 || !!this.draft);
+		// Highlights follow the master toggle alone, so they persist while the
+		// sidebar panel hosts the cards (dc-has is off, dc-highlights stays on).
+		this.container.toggleClass("dc-highlights", this.deps.showComments());
+		const topRef = this.readingView.getBoundingClientRect().top;
+		const placements: Array<{ el: HTMLElement; top: number }> = [];
+		for (const c of this.comments) {
+			const card = this.cards.get(c.id);
+			if (!card) continue;
+			const span = this.scroller.querySelector(`.doc-comment-span[data-cid="${cssEscape(c.id)}"]`);
+			if (!span) {
+				card.el.addClass("dc-offscreen");
+				continue;
+			}
+			card.el.removeClass("dc-offscreen");
+			if (card.el.offsetHeight === 0) continue;
+			placements.push({ el: card.el, top: span.getBoundingClientRect().top - topRef });
+		}
+		if (this.draftEl && this.draftAnchor) {
+			placements.push({ el: this.draftEl, top: this.draftAnchor.getBoundingClientRect().top - topRef });
+		}
+		placements.sort((a, b) => a.top - b.top);
+		let cursor = ORPHAN_TOP;
+		for (const p of placements) {
+			const y = Math.max(p.top, cursor);
+			p.el.setCssStyles({ top: `${y}px` });
+			cursor = y + p.el.offsetHeight + CARD_GAP;
+		}
+	}
+
+	/** Show an inline draft composer for a new comment (Reading-view "Add"). */
+	showDraft(from: number, to: number, range: Range): void {
+		this.clearDraft();
+		const span = this.scroller.ownerDocument.createElement("span");
+		span.className = "doc-comment-span dc-draft";
+		try {
+			range.surroundContents(span);
+		} catch {
+			new Notice("Select within a single paragraph to comment in reading view.");
+			return;
+		}
+		this.draftAnchor = span;
+		this.draft = { from, to };
+		this.draftEl = this.buildDraftEl();
+		this.container.appendChild(this.draftEl);
+		this.position();
+		window.setTimeout(() => {
+			const ta = this.draftEl?.querySelector("textarea");
+			if (ta instanceof HTMLTextAreaElement) ta.focus();
+		}, 0);
+	}
+
+	private buildDraftEl(): HTMLElement {
+		const el = createDiv("doc-comment-card is-draft");
+		const box = el.createDiv("dc-field dc-field--composer");
+		const textarea = box.createEl("textarea", {
+			cls: "dc-field__input",
+			attr: { placeholder: "Write a comment…", rows: "2" },
+		});
+		const actions = box.createDiv("dc-field__actions");
+
+		const submit = () => {
+			const text = textarea.value.trim();
+			const draft = this.draft;
+			this.clearDraft();
+			if (text && draft) void this.insertComment(draft.from, draft.to, text);
+		};
+
+		const cancelBtn = actions.createEl("button", {
+			cls: "dc-round dc-round--cancel",
+			attr: { "aria-label": "Cancel" },
+		});
+		setIcon(cancelBtn, "x");
+		cancelBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			this.clearDraft();
+		});
+
+		const confirmBtn = actions.createEl("button", {
+			cls: "dc-round dc-round--confirm",
+			attr: { "aria-label": "Comment" },
+		});
+		setIcon(confirmBtn, "check");
+		confirmBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			submit();
+		});
+
+		textarea.addEventListener("keydown", (e) => {
+			if (e.key === "Escape") {
+				e.preventDefault();
+				this.clearDraft();
+			} else if (e.key === "Enter" && !e.shiftKey) {
+				e.preventDefault();
+				submit();
+			}
+		});
+		return el;
+	}
+
+	private async insertComment(from: number, to: number, text: string): Promise<void> {
+		const file = this.view.file;
+		if (!file) return;
+		try {
+			const newData = await this.deps.app.vault.process(file, (data) => {
+				const id = generateId(existingIds(data));
+				const changes = computeAddComment(data, from, to, {
+					id,
+					createdAt: new Date().toISOString(),
+					author: this.deps.getAuthor(),
+					text,
+				});
+				return changes ? applyChanges(data, changes) : data;
+			});
+			await this.refresh(newData);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "unknown error";
+			new Notice(`Couldn't add the comment: ${message}`);
+		}
+	}
+
+	private clearDraft(): void {
+		if (this.draftAnchor) {
+			// Unwrap the temp highlight span, restoring the original text nodes.
+			const parent = this.draftAnchor.parentNode;
+			if (parent) {
+				while (this.draftAnchor.firstChild) parent.insertBefore(this.draftAnchor.firstChild, this.draftAnchor);
+				parent.removeChild(this.draftAnchor);
+				parent.normalize();
+			}
+			this.draftAnchor = null;
+		}
+		this.draftEl?.remove();
+		this.draftEl = null;
+		this.draft = null;
+	}
+
+	private setActive(id: string | null): void {
+		if (this.activeId === id) return;
+		if (this.activeId) {
+			this.cards.get(this.activeId)?.setActive(false);
+			this.markHighlight(this.activeId, false);
+		}
+		this.activeId = id;
+		if (id) {
+			this.cards.get(id)?.setActive(true);
+			this.markHighlight(id, true);
+		}
+	}
+
+	private markHighlight(id: string, active: boolean): void {
+		this.scroller
+			.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`)
+			.forEach((s) => s.classList.toggle("is-active", active));
+	}
+
+	private scrollToAnchor(id: string): void {
+		const span = this.scroller.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		if (!span) return;
+		span.scrollIntoView({ block: "center", behavior: "smooth" });
+		this.setActive(id);
+		span.classList.add("dc-flash");
+		window.setTimeout(() => span.classList.remove("dc-flash"), 900);
+	}
+
+	private onMouseOver = (e: MouseEvent): void => {
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		const id = span?.getAttribute("data-cid");
+		if (id) this.setActive(id);
+	};
+
+	private onMouseOut = (e: MouseEvent): void => {
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		if (!span) return;
+		const to = e.relatedTarget;
+		if (to instanceof Node && span.contains(to)) return;
+		this.setActive(null);
+	};
+
+	private onMouseDown = (e: MouseEvent): void => {
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		const id = span?.getAttribute("data-cid");
+		if (id) this.setActive(id);
+	};
+
+	destroy(): void {
+		this.clearDraft();
+		this.scroller.removeEventListener("scroll", this.scrollHandler);
+		this.resizeObserver.disconnect();
+		this.readingView.removeEventListener("mouseover", this.onMouseOver);
+		this.readingView.removeEventListener("mouseout", this.onMouseOut);
+		this.readingView.removeEventListener("mousedown", this.onMouseDown);
+		this.container.remove();
+		this.cards.clear();
+	}
+}
+
+/** Tracks one ReadingMargin per reading-view container, creating/destroying as
+ *  markdown leaves enter/leave preview mode. */
+export class ReadingMarginManager {
+	private margins = new Map<HTMLElement, ReadingMargin>();
+
+	constructor(private deps: ReadingDeps) {}
+
+	refresh(): void {
+		const active = new Set<HTMLElement>();
+		for (const leaf of this.deps.app.workspace.getLeavesOfType("markdown")) {
+			const view = leaf.view;
+			if (!(view instanceof MarkdownView) || view.getMode() !== "preview") continue;
+			const rv = view.containerEl.querySelector(".markdown-reading-view");
+			if (!(rv instanceof HTMLElement)) continue;
+			active.add(rv);
+			let margin = this.margins.get(rv);
+			if (!margin) {
+				margin = new ReadingMargin(rv, view, this.deps);
+				this.margins.set(rv, margin);
+			}
+			void margin.refresh();
+		}
+		for (const [rv, margin] of this.margins) {
+			if (!active.has(rv)) {
+				margin.destroy();
+				this.margins.delete(rv);
+			}
+		}
+	}
+
+	/** Show the inline new-comment composer on the active reading view. */
+	startDraft(view: MarkdownView, from: number, to: number, range: Range): void {
+		const rv = view.containerEl.querySelector(".markdown-reading-view");
+		if (!(rv instanceof HTMLElement)) return;
+		let margin = this.margins.get(rv);
+		if (!margin) {
+			margin = new ReadingMargin(rv, view, this.deps);
+			this.margins.set(rv, margin);
+			void margin.refresh();
+		}
+		margin.showDraft(from, to, range);
+	}
+
+	destroy(): void {
+		for (const margin of this.margins.values()) margin.destroy();
+		this.margins.clear();
+	}
+}

@@ -1,0 +1,14 @@
+# build / deps
+node_modules/
+main.js
+*.js.map
+
+# editor / os
+.DS_Store
+.vscode/
+
+# test
+coverage/
+
+# obsidian local test vault symlinks
+/test-vault/.obsidian/plugins/document-comments/main.js

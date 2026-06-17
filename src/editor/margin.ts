@@ -1,0 +1,337 @@
+import { setIcon } from "obsidian";
+import { EditorView, PluginValue, ViewPlugin } from "@codemirror/view";
+import { ParsedComment } from "../format/types";
+import { anchorRange, isAnchored } from "../format/parse";
+import { commentField } from "./state";
+import { commentConfig } from "./config";
+import { clearDraft, draftField } from "./draft";
+import { Card, CardCallbacks, cardSignature } from "../ui/card";
+import {
+	addComment,
+	appendReply,
+	deleteComment,
+	deleteEntry,
+	editEntry,
+	setResolved,
+	toggleReaction,
+} from "./commands";
+import { cssEscape } from "../util/css";
+
+const CARD_GAP = 8;
+const ORPHAN_TOP = 8;
+
+/**
+ * Renders the floating right-margin column: one card per comment, vertically
+ * aligned to its anchor line, with a stacking pass so cards never overlap.
+ */
+class MarginView implements PluginValue {
+	private container: HTMLElement;
+	private cards = new Map<string, Card>();
+	private activeId: string | null = null;
+	private draftEl: HTMLElement | null = null;
+	private draftFocused = false;
+	private draftOutside: ((e: MouseEvent) => void) | null = null;
+	private cb: CardCallbacks;
+	private scrollHandler = () => this.requestReposition();
+	private resizeObserver: ResizeObserver;
+
+	constructor(private view: EditorView) {
+		this.container = view.dom.createDiv("doc-comment-margin");
+		// The container lives inside .cm-editor, so CodeMirror would otherwise
+		// intercept clicks/keystrokes meant for our textareas and buttons. Stop
+		// those events at the container so our inputs behave like normal inputs.
+		const stop = (e: Event) => e.stopPropagation();
+		for (const type of [
+			"mousedown",
+			"mouseup",
+			"click",
+			"dblclick",
+			"keydown",
+			"keyup",
+			"input",
+			"beforeinput",
+			"paste",
+			"cut",
+			"contextmenu",
+		]) {
+			this.container.addEventListener(type, stop);
+		}
+		this.cb = {
+			getAuthor: () => view.state.facet(commentConfig).author(),
+			onHover: (id, active) => this.setActive(active ? id : null),
+			onClickAnchor: (id) => this.scrollToAnchor(id),
+			onResize: () => this.reposition(),
+			reply: (id, text) => void appendReply(view, id, text, this.cb.getAuthor()),
+			setResolved: (id, resolved) => void setResolved(view, id, resolved),
+			remove: (id) => void deleteComment(view, id),
+			editEntry: (id, index, text) => void editEntry(view, id, index, text),
+			deleteEntry: (id, index) => void deleteEntry(view, id, index),
+			toggleReaction: (id, emoji) => void toggleReaction(view, id, emoji, this.cb.getAuthor()),
+		};
+
+		view.scrollDOM.addEventListener("scroll", this.scrollHandler, { passive: true });
+		this.resizeObserver = new ResizeObserver(() => this.requestReposition());
+		this.resizeObserver.observe(view.scrollDOM);
+		view.contentDOM.addEventListener("mousedown", this.onContentMouseDown);
+		view.contentDOM.addEventListener("mouseover", this.onContentMouseOver);
+		view.contentDOM.addEventListener("mouseout", this.onContentMouseOut);
+
+		this.reconcile();
+		this.requestReposition();
+	}
+
+	update(): void {
+		// Reconcile (pure DOM — safe during the update cycle), then schedule the
+		// geometry-dependent reposition for the measure phase. coordsAtPos throws if
+		// called during an update/construction, so positioning MUST go through
+		// requestMeasure. The key also coalesces bursts into one measure per frame.
+		this.reconcile();
+		this.requestReposition();
+	}
+
+	private requestReposition(): void {
+		this.view.requestMeasure({ key: this, read: () => this.reposition() });
+	}
+
+	destroy(): void {
+		this.view.scrollDOM.removeEventListener("scroll", this.scrollHandler);
+		this.resizeObserver.disconnect();
+		this.view.contentDOM.removeEventListener("mousedown", this.onContentMouseDown);
+		this.view.contentDOM.removeEventListener("mouseover", this.onContentMouseOver);
+		this.view.contentDOM.removeEventListener("mouseout", this.onContentMouseOut);
+		this.removeDraftOutside();
+		this.cards.clear();
+		this.container.remove();
+	}
+
+	private comments(): ParsedComment[] {
+		const cfg = this.view.state.facet(commentConfig);
+		// When the sidebar panel is open the comments live there, so the inline
+		// column steps aside (no cards, no reserved width). Highlights persist —
+		// they're keyed on `dc-highlights`, which still follows showComments.
+		if (!cfg.showComments() || cfg.sidebarOpen()) return [];
+		const fv = this.view.state.field(commentField, false);
+		if (!fv) return [];
+		// Resolved cards stay in the DOM and are hidden via a container class, so
+		// toggling visibility never requires rebuilding the editor.
+		return fv.comments.filter((c) => c.body);
+	}
+
+	private reconcile(): void {
+		const comments = this.comments();
+		const present = new Set(comments.map((c) => c.id));
+
+		for (const [id, card] of this.cards) {
+			if (!present.has(id)) {
+				card.el.remove();
+				this.cards.delete(id);
+				if (this.activeId === id) this.activeId = null;
+			}
+		}
+
+		for (const c of comments) {
+			const existing = this.cards.get(c.id);
+			if (!existing) {
+				const card = new Card(c, this.cb);
+				this.cards.set(c.id, card);
+				this.container.appendChild(card.el);
+			} else if (existing.signature !== cardSignature(c)) {
+				existing.update(c);
+			}
+		}
+	}
+
+	private reposition(): void {
+		const cfg = this.view.state.facet(commentConfig);
+		this.container.toggleClass("dc-hide-resolved", !cfg.showResolved());
+		// Highlight visibility follows the master toggle alone — independent of
+		// whether the inline column is reserved (dc-has). That keeps the in-text
+		// highlights when the sidebar panel hosts the cards instead of the column.
+		this.container.toggleClass("dc-highlights", cfg.showComments());
+
+		const draft = this.view.state.field(draftField, false) ?? null;
+		this.syncDraftEl(draft);
+
+		// Mark our own container (which Obsidian never touches) when the note has
+		// comments or a draft; CSS :has() ties the body cap + column position to it,
+		// so nothing drops when Obsidian rebuilds .cm-editor on a mode switch.
+		this.container.toggleClass("dc-has", this.comments().length > 0 || !!draft);
+
+		const editorTop = this.view.dom.getBoundingClientRect().top;
+		const placements: Array<{ el: HTMLElement; top: number }> = [];
+		let orphanCursor = ORPHAN_TOP;
+
+		const place = (el: HTMLElement, pos: number) => {
+			const coords = this.view.coordsAtPos(pos);
+			if (!coords) {
+				el.addClass("dc-offscreen");
+				return;
+			}
+			el.removeClass("dc-offscreen");
+			if (el.offsetHeight === 0) return; // hidden (e.g. resolved)
+			placements.push({ el, top: coords.top - editorTop });
+		};
+
+		for (const c of this.comments()) {
+			const card = this.cards.get(c.id);
+			if (!card) continue;
+			if (!isAnchored(c)) {
+				card.el.removeClass("dc-offscreen");
+				if (card.el.offsetHeight === 0) continue;
+				card.el.setCssStyles({ top: `${orphanCursor}px` });
+				orphanCursor += card.el.offsetHeight + CARD_GAP;
+				continue;
+			}
+			place(card.el, anchorRange(c)!.from);
+		}
+
+		if (draft && this.draftEl) place(this.draftEl, draft.from);
+
+		placements.sort((a, b) => a.top - b.top);
+		let cursor = orphanCursor;
+		for (const p of placements) {
+			const y = Math.max(p.top, cursor);
+			p.el.setCssStyles({ top: `${y}px` });
+			cursor = y + p.el.offsetHeight + CARD_GAP;
+		}
+	}
+
+	/** Create/remove the transient "new comment" composer card. */
+	private syncDraftEl(draft: { from: number; to: number } | null): void {
+		if (draft && !this.draftEl) {
+			this.draftEl = this.buildDraftEl();
+			this.container.appendChild(this.draftEl);
+			this.draftFocused = false;
+			// Click away from an empty draft dismisses it (Notion behavior).
+			this.draftOutside = (e: MouseEvent) => {
+				if (!this.draftEl || this.draftEl.contains(e.target as Node)) return;
+				const ta = this.draftEl.querySelector("textarea");
+				if (ta instanceof HTMLTextAreaElement && ta.value.trim() === "") {
+					this.view.dispatch({ effects: clearDraft.of(null) });
+				}
+			};
+			this.view.dom.ownerDocument.addEventListener("mousedown", this.draftOutside, true);
+		} else if (!draft && this.draftEl) {
+			this.draftEl.remove();
+			this.draftEl = null;
+			this.removeDraftOutside();
+		}
+		if (draft && this.draftEl && !this.draftFocused) {
+			this.draftFocused = true;
+			window.setTimeout(() => this.draftEl?.querySelector("textarea")?.focus(), 0);
+		}
+	}
+
+	private removeDraftOutside(): void {
+		if (this.draftOutside) {
+			this.view.dom.ownerDocument.removeEventListener("mousedown", this.draftOutside, true);
+			this.draftOutside = null;
+		}
+	}
+
+	private buildDraftEl(): HTMLElement {
+		const el = createDiv("doc-comment-card is-draft");
+		const box = el.createDiv("dc-field dc-field--composer");
+		const textarea = box.createEl("textarea", {
+			cls: "dc-field__input",
+			attr: { placeholder: "Write a comment…", rows: "2" },
+		});
+		const actions = box.createDiv("dc-field__actions");
+
+		const cancel = () => this.view.dispatch({ effects: clearDraft.of(null) });
+		const submit = () => {
+			const text = textarea.value.trim();
+			const draft = this.view.state.field(draftField, false);
+			if (text && draft) addComment(this.view, draft.from, draft.to, text, this.cb.getAuthor());
+			this.view.dispatch({ effects: clearDraft.of(null) });
+		};
+
+		const cancelBtn = actions.createEl("button", {
+			cls: "dc-round dc-round--cancel",
+			attr: { "aria-label": "Cancel" },
+		});
+		setIcon(cancelBtn, "x");
+		cancelBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			cancel();
+		});
+
+		const confirmBtn = actions.createEl("button", {
+			cls: "dc-round dc-round--confirm",
+			attr: { "aria-label": "Comment" },
+		});
+		setIcon(confirmBtn, "check");
+		confirmBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			submit();
+		});
+
+		textarea.addEventListener("keydown", (e) => {
+			if (e.key === "Escape") {
+				e.preventDefault();
+				cancel();
+			} else if (e.key === "Enter" && !e.shiftKey) {
+				e.preventDefault();
+				submit();
+			}
+		});
+		return el;
+	}
+
+	private setActive(id: string | null): void {
+		if (this.activeId === id) return;
+		if (this.activeId) {
+			this.cards.get(this.activeId)?.setActive(false);
+			this.markHighlight(this.activeId, false);
+		}
+		this.activeId = id;
+		if (id) {
+			this.cards.get(id)?.setActive(true);
+			this.markHighlight(id, true);
+		}
+	}
+
+	private markHighlight(id: string, active: boolean): void {
+		const spans = this.view.contentDOM.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		spans.forEach((s) => s.classList.toggle("is-active", active));
+	}
+
+	private scrollToAnchor(id: string): void {
+		const c = this.comments().find((x) => x.id === id);
+		if (!c) return;
+		const r = anchorRange(c);
+		const pos = r ? r.from : c.body?.from;
+		if (pos == null) return;
+		this.view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+		this.setActive(id);
+		window.setTimeout(() => {
+			const span = this.view.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+			if (!span) return;
+			span.classList.add("dc-flash");
+			window.setTimeout(() => span.classList.remove("dc-flash"), 900);
+		}, 50);
+	}
+
+	private onContentMouseDown = (e: MouseEvent): void => {
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		const id = span?.getAttribute("data-cid");
+		if (id) this.setActive(id);
+	};
+
+	private onContentMouseOver = (e: MouseEvent): void => {
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		const id = span?.getAttribute("data-cid");
+		if (id) this.setActive(id);
+	};
+
+	private onContentMouseOut = (e: MouseEvent): void => {
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		if (!span) return;
+		// Ignore moves that stay within the same highlight element (avoids flicker).
+		const to = e.relatedTarget;
+		if (to instanceof Node && span.contains(to)) return;
+		this.setActive(null);
+	};
+}
+
+export const marginPlugin = ViewPlugin.fromClass(MarginView);

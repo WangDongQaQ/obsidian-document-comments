@@ -1,0 +1,17 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "oxc", "unicorn"],
+	"categories": {
+		"correctness": "error"
+	},
+	"rules": {
+		"func-style": ["error", "expression"],
+		"prefer-arrow-callback": "error",
+		"prefer-const": "error",
+		"no-var": "error",
+		"no-else-return": "error",
+		"eqeqeq": ["error", "smart"],
+		"typescript/consistent-type-definitions": ["error", "type"]
+	},
+	"ignorePatterns": ["main.js", "esbuild.config.mjs"]
+}

@@ -1,0 +1,96 @@
+import { describe, it, expect } from "vitest";
+import {
+	applyChanges,
+	blockEnd,
+	computeAddComment,
+	computeAppendReply,
+	computeDeleteComment,
+	computeSetResolved,
+} from "../src/editor/edits";
+import { anchorRange, parseComments } from "../src/format/parse";
+import { closeMarker, openMarker } from "../src/format/serialize";
+
+const DOC = "We should ship on Friday regardless of the QA timeline.\n\nNext paragraph.\n";
+const FROM = DOC.indexOf("ship on Friday");
+const TO = FROM + "ship on Friday".length;
+
+function add(): string {
+	const changes = computeAddComment(DOC, FROM, TO, {
+		id: "k3f9",
+		createdAt: "2026-06-17T10:00:00.000Z",
+		author: "kyle",
+		text: "I thought we agreed Thursday?",
+	})!;
+	return applyChanges(DOC, changes);
+}
+
+describe("computeAddComment", () => {
+	it("wraps the selection and appends a body", () => {
+		const out = add();
+		const c = parseComments(out)[0];
+		expect(c.id).toBe("k3f9");
+		expect(c.author).toBe("kyle");
+		expect(c.thread[0].text).toBe("I thought we agreed Thursday?");
+		expect(out.slice(anchorRange(c)!.from, anchorRange(c)!.to)).toBe("ship on Friday");
+	});
+
+	it("places markers and body exactly", () => {
+		const out = add();
+		expect(out).toContain(openMarker("k3f9") + "ship on Friday" + closeMarker("k3f9"));
+		expect(out).toContain("QA timeline.\n<!--co:k3f9");
+	});
+
+	it("keeps the prose intact once markup is stripped", () => {
+		const out = add();
+		expect(stripComments(out)).toContain("We should ship on Friday regardless of the QA timeline.");
+	});
+
+	it("returns null for an empty selection", () => {
+		expect(computeAddComment(DOC, FROM, FROM, { id: "x", createdAt: "t", author: "a", text: "b" })).toBeNull();
+	});
+});
+
+describe("reply / resolve", () => {
+	it("appends a reply", () => {
+		const out = applyChanges(
+			add(),
+			computeAppendReply(add(), "k3f9", {
+				createdAt: "2026-06-17T11:00:00.000Z",
+				author: "sam",
+				text: "Thursday is better",
+			})!,
+		);
+		const c = parseComments(out)[0];
+		expect(c.thread).toHaveLength(2);
+		expect(c.thread[1]).toMatchObject({ author: "sam", text: "Thursday is better" });
+	});
+
+	it("toggles resolved status", () => {
+		const resolved = applyChanges(add(), computeSetResolved(add(), "k3f9", true)!);
+		expect(parseComments(resolved)[0].status).toBe("resolved");
+		const reopened = applyChanges(resolved, computeSetResolved(resolved, "k3f9", false)!);
+		expect(parseComments(reopened)[0].status).toBe("open");
+	});
+});
+
+describe("computeDeleteComment", () => {
+	it("round-trips back to the original document", () => {
+		const out = add();
+		const restored = applyChanges(out, computeDeleteComment(out, "k3f9")!);
+		expect(restored).toBe(DOC);
+	});
+});
+
+describe("blockEnd", () => {
+	it("stops at the blank line after a paragraph", () => {
+		expect(blockEnd(DOC, TO)).toBe(DOC.indexOf("\n"));
+	});
+	it("returns doc length when no trailing newline", () => {
+		const d = "single line no newline";
+		expect(blockEnd(d, 3)).toBe(d.length);
+	});
+});
+
+function stripComments(s: string): string {
+	return s.replace(/<!--\/?co?:[A-Za-z0-9]+[\s\S]*?-->/g, "");
+}

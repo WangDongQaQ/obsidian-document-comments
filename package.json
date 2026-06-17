@@ -1,0 +1,39 @@
+{
+	"name": "document-comments",
+	"version": "0.1.0",
+	"description": "Notion-style margin comments for Obsidian, stored inline in markdown.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"typecheck": "tsc -noEmit -skipLibCheck",
+		"format": "oxfmt src test",
+		"format:check": "oxfmt --check src test",
+		"lint": "oxlint src && eslint src",
+		"lint:fix": "oxlint src --fix && eslint src --fix",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"check": "npm run format:check && npm run lint && npm run typecheck && npm test"
+	},
+	"keywords": [
+		"obsidian-plugin"
+	],
+	"author": "Kyle McDonald",
+	"license": "MIT",
+	"devDependencies": {
+		"@codemirror/state": "^6.5.0",
+		"@codemirror/view": "^6.38.6",
+		"@types/node": "^20.12.7",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.20.2",
+		"eslint": "^10.5.0",
+		"eslint-plugin-obsidianmd": "^0.3.0",
+		"happy-dom": "^20.10.5",
+		"obsidian": "^1.5.7",
+		"oxfmt": "^0.55.0",
+		"oxlint": "^1.70.0",
+		"typescript": "^5.4.5",
+		"typescript-eslint": "^8.61.1",
+		"vitest": "^1.6.0"
+	}
+}
