@@ -11,44 +11,43 @@ import {
 	computeDeleteComment,
 	computeDeleteEntry,
 	computeEditEntry,
-	computeSetResolved,
 	computeToggleReaction,
 } from "../editor/edits";
 import { cssEscape } from "../util/css";
+import { offsetToLineCh, sourceOffsetAtViewportCenter } from "../reading/highlight";
 
-export const COMMENTS_VIEW_TYPE = "document-comments-sidebar";
+export const COMMENTS_VIEW_TYPE = "aspen-document-comments-sidebar";
 
 export type SidebarDeps = {
 	app: App;
 	getAuthor: () => string;
 };
 
-/** Panel-local status filter — independent of the document's resolved setting. */
-type FilterMode = "open" | "resolved" | "all";
-
-const FILTERS: ReadonlyArray<{ mode: FilterMode; label: string }> = [
-	{ mode: "open", label: "Open" },
-	{ mode: "resolved", label: "Resolved" },
-	{ mode: "all", label: "All" },
-];
+const CARD_GAP = 8;
+const EDGE_PAD = 8;
 
 /**
- * The "All discussions" panel: a dedicated side view listing the active note's
- * comments as Notion-style cards, with an Open / Resolved / All status filter.
- * While it's open the inline floating cards step aside (the plugin reads
- * `onMountedChange`); the in-text highlights stay. Edits route through the open
- * editor when there is one (so they join its undo history), else `vault.process`.
+ * A right-sidebar margin: cards are positioned against the active note's viewport,
+ * while off-screen comments collapse into jump bars.
  */
 export class CommentsSidebarView extends ItemView {
-	private listEl!: HTMLElement;
+	private trackEl!: HTMLElement;
 	private emptyEl!: HTMLElement;
 	private titleEl!: HTMLElement;
+	private topBar!: HTMLButtonElement;
+	private bottomBar!: HTMLButtonElement;
 	private cards = new Map<string, Card>();
+	private comments: ParsedComment[] = [];
 	private file: TFile | null = null;
+	private aboveIds: string[] = [];
+	private belowIds: string[] = [];
+	private boundScroller: HTMLElement | null = null;
 	private cb: CardCallbacks;
 	private scheduleRefresh: Debouncer<[], void>;
-	private filter: FilterMode = "open";
-	private tabs: Array<{ mode: FilterMode; el: HTMLElement; countEl: HTMLElement }> = [];
+	private schedulePosition: Debouncer<[], void>;
+	private resizeObserver: ResizeObserver | null = null;
+	private animFrames = 0;
+	private animatingLoop = false;
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -56,13 +55,13 @@ export class CommentsSidebarView extends ItemView {
 	) {
 		super(leaf);
 		this.scheduleRefresh = debounce(() => void this.refresh(), 60, true);
+		this.schedulePosition = debounce(() => this.position(), 16, true);
 		this.cb = {
 			getAuthor: () => deps.getAuthor(),
 			onHover: (id, active) => this.markDocHighlight(id, active),
-			onClickAnchor: (id) => this.revealAnchor(id),
-			onResize: () => {
-				/* the panel uses normal flow — cards reflow on their own */
-			},
+			onClickAnchor: (id) => void this.revealAnchor(id),
+			onResize: () => this.position(),
+			animateLayout: () => this.animateLayout(),
 			revealComposer: (id) => this.revealComposer(id),
 			reply: (id, text) =>
 				void this.edit((doc) =>
@@ -72,7 +71,8 @@ export class CommentsSidebarView extends ItemView {
 						text,
 					}),
 				),
-			setResolved: (id, resolved) => void this.edit((doc) => computeSetResolved(doc, id, resolved)),
+			// ponytail: Card still expects the callback; no resolve UI calls it.
+			setResolved: () => {},
 			remove: (id) => void this.edit((doc) => computeDeleteComment(doc, id)),
 			editEntry: (id, index, text) => void this.edit((doc) => computeEditEntry(doc, id, index, text)),
 			deleteEntry: (id, index) => void this.edit((doc) => computeDeleteEntry(doc, id, index)),
@@ -90,7 +90,7 @@ export class CommentsSidebarView extends ItemView {
 	}
 
 	getIcon(): string {
-		return "message-square";
+		return "messages-square";
 	}
 
 	async onOpen(): Promise<void> {
@@ -98,26 +98,25 @@ export class CommentsSidebarView extends ItemView {
 		root.empty();
 		root.addClass("dc-sidebar-view");
 
-		const header = root.createDiv("dc-sidebar__header");
+		const header = root.createDiv("dc-sidebar__header dc-sidebar__header--simple");
 		this.titleEl = header.createDiv("dc-sidebar__title");
 
-		// Panel-local status filter (Open / Resolved / All), each with a live count.
-		const tabs = header.createDiv("dc-sidebar__tabs");
-		this.tabs = FILTERS.map(({ mode, label }) => {
-			const el = tabs.createEl("button", { cls: "dc-sidebar__tab" });
-			el.createSpan({ text: label });
-			const countEl = el.createSpan({ cls: "dc-sidebar__tab-count" });
-			el.addEventListener("click", () => this.setFilter(mode));
-			return { mode, el, countEl };
-		});
+		const viewport = root.createDiv("dc-follow-sidebar");
+		this.topBar = viewport.createEl("button", { cls: "dc-sidebar-edge dc-sidebar-edge--top is-hidden" });
+		this.trackEl = viewport.createDiv("dc-sidebar-track");
+		this.emptyEl = viewport.createDiv("dc-sidebar__empty");
+		this.bottomBar = viewport.createEl("button", { cls: "dc-sidebar-edge dc-sidebar-edge--bottom is-hidden" });
+		this.topBar.addEventListener("click", () => this.jumpCollapsed("above"));
+		this.bottomBar.addEventListener("click", () => this.jumpCollapsed("below"));
 
-		this.listEl = root.createDiv("dc-sidebar");
-		this.emptyEl = root.createDiv("dc-sidebar__empty");
+		this.resizeObserver = new ResizeObserver(() => this.position());
+		this.resizeObserver.observe(viewport);
 
-		// Follow the active note, its content, and external edits.
 		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleRefresh()));
 		this.registerEvent(this.app.workspace.on("file-open", () => this.scheduleRefresh()));
 		this.registerEvent(this.app.workspace.on("editor-change", () => this.scheduleRefresh()));
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRefresh()));
+		this.registerEvent(this.app.workspace.on("resize", () => this.schedulePosition()));
 		this.registerEvent(
 			this.app.vault.on("modify", (f) => {
 				if (this.file && f.path === this.file.path) this.scheduleRefresh();
@@ -128,6 +127,8 @@ export class CommentsSidebarView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.unbindDocumentScroll();
+		this.resizeObserver?.disconnect();
 		for (const card of this.cards.values()) {
 			card.destroy();
 			card.el.remove();
@@ -135,38 +136,32 @@ export class CommentsSidebarView extends ItemView {
 		this.cards.clear();
 	}
 
-	/** Public hook so the plugin can re-render after an external change. */
 	requestRefresh(): void {
 		this.scheduleRefresh();
 	}
 
-	/** Scroll the panel to a thread and flash it — the landing point when a too-tall
-	 *  margin card escapes here. Switches to "All" so the thread is always shown. */
 	async revealComment(id: string): Promise<void> {
-		this.filter = "all";
 		await this.refresh();
-		const card = this.cards.get(id);
-		if (!card) return;
-		card.el.scrollIntoView({ block: "center", behavior: "smooth" });
-		card.el.addClass("dc-flash");
-		window.setTimeout(() => card.el.removeClass("dc-flash"), 1000);
+		await this.revealAnchor(id);
+		window.setTimeout(() => {
+			const card = this.cards.get(id);
+			if (!card) return;
+			card.el.addClass("dc-flash");
+			window.setTimeout(() => card.el.removeClass("dc-flash"), 1000);
+		}, 260);
 	}
 
-	/** Scroll the panel to reveal a just-opened reply composer. Centers it (the bottom
-	 *  padding gives the last card room) so it isn't pinned at the cut-off bottom edge
-	 *  and has space to grow as you type. */
 	private revealComposer(id: string): void {
 		const card = this.cards.get(id);
 		if (!card) return;
 		window.requestAnimationFrame(() => {
-			card.el.querySelector(".dc-field--composer")?.scrollIntoView({ block: "center", behavior: "smooth" });
+			const box = card.el.querySelector(".dc-field--composer");
+			if (!(box instanceof HTMLElement)) return;
+			const b = box.getBoundingClientRect();
+			const t = this.trackEl.getBoundingClientRect();
+			const delta = b.bottom > t.bottom ? b.bottom - t.bottom + 12 : b.top < t.top ? b.top - t.top - 12 : 0;
+			if (delta && this.boundScroller) this.boundScroller.scrollTop += delta;
 		});
-	}
-
-	private setFilter(mode: FilterMode): void {
-		if (this.filter === mode) return;
-		this.filter = mode;
-		void this.refresh();
 	}
 
 	private async refresh(text?: string): Promise<void> {
@@ -174,10 +169,11 @@ export class CommentsSidebarView extends ItemView {
 
 		const file = this.file;
 		if (!file) {
+			this.comments = [];
 			this.renderComments([]);
 			this.titleEl.setText("Comments");
-			this.paintTabs({ open: 0, resolved: 0, all: 0 });
 			this.setEmpty("Open a note to see its comments.");
+			this.position();
 			return;
 		}
 
@@ -185,39 +181,20 @@ export class CommentsSidebarView extends ItemView {
 		try {
 			data = text ?? (await this.currentText(file));
 		} catch {
+			this.comments = [];
 			this.renderComments([]);
 			this.titleEl.setText(file.basename);
-			this.paintTabs({ open: 0, resolved: 0, all: 0 });
 			this.setEmpty("Couldn't read this note.");
+			this.position();
 			return;
 		}
 
-		const all = parseComments(data).filter((c) => c.body);
-		const open = all.filter((c) => c.status !== "resolved");
-		const resolved = all.filter((c) => c.status === "resolved");
-		const shown = this.filter === "open" ? open : this.filter === "resolved" ? resolved : all;
-
-		this.titleEl.setText(file.basename);
-		this.paintTabs({ open: open.length, resolved: resolved.length, all: all.length });
-		this.renderComments(shown);
-		this.setEmpty(this.emptyMessage(all.length, shown.length));
-	}
-
-	private emptyMessage(total: number, shown: number): string | null {
-		if (shown > 0) return null;
-		if (total === 0) return "No comments in this note yet.";
-		if (this.filter === "open") return "No open comments.";
-		if (this.filter === "resolved") return "No resolved comments.";
-		return "Nothing to show.";
-	}
-
-	private paintTabs(counts: Record<FilterMode, number>): void {
-		for (const tab of this.tabs) {
-			const active = tab.mode === this.filter;
-			tab.el.toggleClass("is-active", active);
-			tab.el.setAttribute("aria-pressed", active ? "true" : "false");
-			tab.countEl.setText(String(counts[tab.mode]));
-		}
+		this.comments = parseComments(data).filter((c) => c.body);
+		this.titleEl.setText(`${file.basename} - ${this.comments.length}`);
+		this.renderComments(this.comments);
+		this.setEmpty(this.comments.length === 0 ? "No comments in this note yet." : null);
+		this.bindDocumentScroll();
+		this.position();
 	}
 
 	private renderComments(comments: ParsedComment[]): void {
@@ -229,22 +206,98 @@ export class CommentsSidebarView extends ItemView {
 				this.cards.delete(id);
 			}
 		}
-		const cardView = { app: this.app, sourcePath: () => this.file?.path ?? "" };
+		const cardView = { app: this.app, sourcePath: () => this.file?.path ?? "", collapsible: true };
 		for (const c of comments) {
 			const existing = this.cards.get(c.id);
 			if (!existing) {
-				this.cards.set(c.id, new Card(c, this.cb, cardView));
+				const card = new Card(c, this.cb, cardView);
+				this.cards.set(c.id, card);
+				this.trackEl.appendChild(card.el);
 			} else if (existing.signature !== cardSignature(c)) {
 				existing.update(c);
 			}
 		}
-		// Re-order the DOM to match document order — but only touch it when the
-		// order actually differs, so an open composer doesn't lose focus on every
-		// content refresh.
 		const desired = comments.map((c) => this.cards.get(c.id)!.el);
-		const current = Array.from(this.listEl.children);
+		const current = Array.from(this.trackEl.children).filter((el) => el.classList.contains("doc-comment-card"));
 		const sameOrder = desired.length === current.length && desired.every((el, i) => el === current[i]);
-		if (!sameOrder) for (const el of desired) this.listEl.appendChild(el);
+		if (!sameOrder) for (const el of desired) this.trackEl.appendChild(el);
+	}
+
+	private position(): void {
+		if (!this.trackEl.isConnected) return;
+		this.bindDocumentScroll();
+		const box = this.trackEl.getBoundingClientRect();
+		const height = this.trackEl.clientHeight;
+		const placements: Array<{ id: string; el: HTMLElement; top: number }> = [];
+		const centerOffset = this.readingCenterOffset();
+		this.aboveIds = [];
+		this.belowIds = [];
+
+		for (const [order, c] of this.comments.entries()) {
+			const card = this.cards.get(c.id);
+			if (!card) continue;
+			const top = this.anchorTop(c);
+			if (top == null) {
+				const pos = this.commentSourcePos(c) ?? order;
+				if (centerOffset != null && pos < centerOffset) this.aboveIds.push(c.id);
+				else this.belowIds.push(c.id);
+				card.el.addClass("dc-sidebar-offscreen");
+				continue;
+			}
+			const y = top - box.top;
+			if (y < 0) {
+				this.aboveIds.push(c.id);
+				card.el.addClass("dc-sidebar-offscreen");
+			} else if (y > height) {
+				this.belowIds.push(c.id);
+				card.el.addClass("dc-sidebar-offscreen");
+			} else {
+				card.el.removeClass("dc-sidebar-offscreen");
+				placements.push({ id: c.id, el: card.el, top: y });
+			}
+		}
+
+		placements.sort((a, b) => a.top - b.top);
+		let cursor = EDGE_PAD;
+		for (const p of placements) {
+			const y = Math.max(p.top, cursor);
+			p.el.setCssStyles({ top: `${y}px` });
+			p.el.toggleClass("is-edge-top", y < EDGE_PAD + 16);
+			p.el.toggleClass("is-edge-bottom", y + p.el.offsetHeight > height - EDGE_PAD - 16);
+			cursor = y + p.el.offsetHeight + CARD_GAP;
+		}
+		this.paintEdgeBars();
+	}
+
+	private anchorTop(c: ParsedComment): number | null {
+		const file = this.file;
+		if (!file) return null;
+		const view = this.markdownViewForFile(file);
+		if (!view) return null;
+		if (view.getMode() === "preview") {
+			const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(c.id)}"]`);
+			return span instanceof HTMLElement ? span.getBoundingClientRect().top : null;
+		}
+		const cm = this.editorViewForFile(file);
+		if (!cm) return null;
+		const r = anchorRange(c);
+		const pos = r ? r.from : c.body?.from;
+		if (pos == null) return null;
+		return cm.coordsAtPos(pos)?.top ?? null;
+	}
+
+	private paintEdgeBars(): void {
+		this.topBar.toggleClass("is-hidden", this.aboveIds.length === 0);
+		this.bottomBar.toggleClass("is-hidden", this.belowIds.length === 0);
+		this.topBar.setText(String(this.aboveIds.length));
+		this.bottomBar.setText(String(this.belowIds.length));
+		this.topBar.setAttribute("aria-label", `Jump to ${this.aboveIds.length} hidden comments above`);
+		this.bottomBar.setAttribute("aria-label", `Jump to ${this.belowIds.length} hidden comments below`);
+	}
+
+	private jumpCollapsed(direction: "above" | "below"): void {
+		const id = direction === "above" ? this.aboveIds[this.aboveIds.length - 1] : this.belowIds[0];
+		if (id) void this.revealAnchor(id);
 	}
 
 	private setEmpty(message: string | null): void {
@@ -252,10 +305,6 @@ export class CommentsSidebarView extends ItemView {
 		this.emptyEl.setText(message ?? "");
 	}
 
-	// ── Edits ──────────────────────────────────────────────────────────────
-	/** Apply a computed change set to the active note. Prefer the open editor
-	 *  (keeps edits in its undo history and in sync with unsaved changes);
-	 *  fall back to a direct file write for notes only shown in reading view. */
 	private async edit(compute: (doc: string) => Result<Change[], string>): Promise<void> {
 		const file = this.file;
 		if (!file) return;
@@ -290,18 +339,24 @@ export class CommentsSidebarView extends ItemView {
 		});
 	}
 
-	// ── Document interplay ─────────────────────────────────────────────────
-	private revealAnchor(id: string): void {
+	private async revealAnchor(id: string): Promise<void> {
 		const file = this.file;
 		if (!file) return;
 		const view = this.markdownViewForFile(file);
 		if (!view) return;
 		if (view.getMode() === "preview") {
-			const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
-			if (span instanceof HTMLElement) {
-				span.scrollIntoView({ block: "center", behavior: "smooth" });
-				this.flash(span);
+			if (this.revealPreviewSpan(view, id)) return;
+			let doc: string;
+			try {
+				doc = await this.currentText(file);
+			} catch {
+				return;
 			}
+			const c = this.comments.find((x) => x.id === id) ?? parseComments(doc).find((x) => x.id === id);
+			const pos = c ? this.commentSourcePos(c) : null;
+			if (pos == null) return;
+			this.scrollPreviewToOffset(view, doc, pos);
+			this.retryPreviewSpan(view, id);
 			return;
 		}
 		const cm = this.editorViewForFile(file);
@@ -315,7 +370,58 @@ export class CommentsSidebarView extends ItemView {
 		window.setTimeout(() => {
 			const span = cm.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
 			if (span instanceof HTMLElement) this.flash(span);
-		}, 50);
+			this.position();
+		}, 80);
+	}
+
+	private revealPreviewSpan(view: MarkdownView, id: string): boolean {
+		const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		if (!(span instanceof HTMLElement)) return false;
+		span.scrollIntoView({ block: "center", behavior: "smooth" });
+		this.flash(span);
+		window.setTimeout(() => this.position(), 220);
+		return true;
+	}
+
+	private retryPreviewSpan(view: MarkdownView, id: string): void {
+		let done = false;
+		const retry = (): void => {
+			if (done) return;
+			done = this.revealPreviewSpan(view, id);
+			if (!done) this.position();
+		};
+		window.setTimeout(retry, 220);
+		window.setTimeout(retry, 650);
+	}
+
+	private scrollPreviewToOffset(view: MarkdownView, doc: string, offset: number): void {
+		const loc = offsetToLineCh(doc, offset);
+		const scroller = this.documentScroller();
+		const before = scroller?.scrollTop;
+		view.setEphemeralState({ ...view.getEphemeralState(), line: loc.line });
+		try {
+			view.editor.scrollIntoView({ from: loc, to: loc }, true);
+		} catch {
+			// Some Obsidian builds don't wire the editor facade in preview mode.
+		}
+		if (!scroller || before == null) return;
+		window.setTimeout(() => {
+			if (Math.abs(scroller.scrollTop - before) > 2) return;
+			const max = scroller.scrollHeight - scroller.clientHeight;
+			if (max > 0) scroller.scrollTo({ top: (offset / Math.max(doc.length, 1)) * max, behavior: "smooth" });
+		}, 40);
+	}
+
+	private commentSourcePos(c: ParsedComment): number | null {
+		const r = anchorRange(c);
+		return r ? r.from : (c.body?.from ?? null);
+	}
+
+	private readingCenterOffset(): number | null {
+		const file = this.file;
+		if (!file) return null;
+		const view = this.markdownViewForFile(file);
+		return view?.getMode() === "preview" ? sourceOffsetAtViewportCenter(view) : null;
 	}
 
 	private markDocHighlight(id: string, active: boolean): void {
@@ -333,7 +439,48 @@ export class CommentsSidebarView extends ItemView {
 		window.setTimeout(() => span.removeClass("dc-flash"), 900);
 	}
 
-	// ── Resolving the active note + its live text ──────────────────────────
+	private animateLayout(): void {
+		this.animFrames = 14;
+		this.position();
+		if (this.animatingLoop) return;
+		this.animatingLoop = true;
+		const tick = (): void => {
+			this.position();
+			if (this.animFrames-- > 0) window.requestAnimationFrame(tick);
+			else this.animatingLoop = false;
+		};
+		window.requestAnimationFrame(tick);
+	}
+
+	private bindDocumentScroll(): void {
+		const next = this.documentScroller();
+		if (next === this.boundScroller) return;
+		this.unbindDocumentScroll();
+		this.boundScroller = next;
+		this.boundScroller?.addEventListener("scroll", this.onDocumentScroll, { passive: true });
+	}
+
+	private unbindDocumentScroll(): void {
+		this.boundScroller?.removeEventListener("scroll", this.onDocumentScroll);
+		this.boundScroller = null;
+	}
+
+	private onDocumentScroll = (): void => {
+		this.schedulePosition();
+	};
+
+	private documentScroller(): HTMLElement | null {
+		const file = this.file;
+		if (!file) return null;
+		const view = this.markdownViewForFile(file);
+		if (!view) return null;
+		if (view.getMode() === "preview") {
+			const scroller = view.containerEl.querySelector(".markdown-preview-view");
+			return scroller instanceof HTMLElement ? scroller : null;
+		}
+		return this.editorViewForFile(file)?.scrollDOM ?? null;
+	}
+
 	private resolveFile(): TFile | null {
 		const active = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (active?.file) return active.file;
@@ -355,7 +502,7 @@ export class CommentsSidebarView extends ItemView {
 	private editorViewForFile(file: TFile): EditorView | null {
 		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
 			const v = leaf.view;
-			if (v instanceof MarkdownView && v.file === file && v.getMode() !== "preview") {
+			if (v instanceof MarkdownView && v.file?.path === file.path && v.getMode() !== "preview") {
 				const cm = (v.editor as unknown as { cm?: unknown }).cm;
 				if (cm instanceof EditorView) return cm;
 			}
@@ -366,7 +513,7 @@ export class CommentsSidebarView extends ItemView {
 	private markdownViewForFile(file: TFile): MarkdownView | null {
 		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
 			const v = leaf.view;
-			if (v instanceof MarkdownView && v.file === file) return v;
+			if (v instanceof MarkdownView && v.file?.path === file.path) return v;
 		}
 		return null;
 	}

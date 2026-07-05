@@ -27,7 +27,8 @@ export const serializeBody = (id: string, data: CommentData): string => {
 
 const serializeEntry = (e: ThreadEntry): string => {
 	const who = e.timestamp ? `${e.author} (${e.timestamp})` : e.author;
-	return `${who}: ${sanitizeBodyText(e.text)}`;
+	const [first = "", ...rest] = sanitizeBodyText(e.text).split("\n");
+	return [`${who}: ${first}`, ...rest.map((line) => `\t${line}`)].join("\n");
 };
 
 /** Body text must never contain the comment terminator `-->`. Break it with a

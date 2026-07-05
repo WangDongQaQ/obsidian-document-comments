@@ -85,6 +85,7 @@ class MarginView implements PluginValue {
 		this.resizeObserver = new ResizeObserver(() => this.requestReposition());
 		this.resizeObserver.observe(view.scrollDOM);
 		view.contentDOM.addEventListener("mousedown", this.onContentMouseDown);
+		view.contentDOM.addEventListener("click", this.onContentClick);
 		view.contentDOM.addEventListener("mouseover", this.onContentMouseOver);
 		view.contentDOM.addEventListener("mouseout", this.onContentMouseOut);
 
@@ -127,6 +128,7 @@ class MarginView implements PluginValue {
 		this.view.scrollDOM.removeEventListener("scroll", this.scrollHandler);
 		this.resizeObserver.disconnect();
 		this.view.contentDOM.removeEventListener("mousedown", this.onContentMouseDown);
+		this.view.contentDOM.removeEventListener("click", this.onContentClick);
 		this.view.contentDOM.removeEventListener("mouseover", this.onContentMouseOver);
 		this.view.contentDOM.removeEventListener("mouseout", this.onContentMouseOut);
 		this.removeDraftOutside();
@@ -236,13 +238,9 @@ class MarginView implements PluginValue {
 			this.draftEl = this.buildDraftEl();
 			this.container.appendChild(this.draftEl);
 			this.draftFocused = false;
-			// Click away from an empty draft dismisses it (Notion behavior).
 			this.draftOutside = (e: MouseEvent) => {
 				if (!this.draftEl || this.draftEl.contains(e.target as Node)) return;
-				const ta = this.draftEl.querySelector("textarea");
-				if (ta instanceof HTMLTextAreaElement && ta.value.trim() === "") {
-					this.view.dispatch({ effects: clearDraft.of(null) });
-				}
+				this.view.dispatch({ effects: clearDraft.of(null) });
 			};
 			this.view.dom.ownerDocument.addEventListener("mousedown", this.draftOutside, true);
 		} else if (!draft && this.draftEl) {
@@ -280,16 +278,6 @@ class MarginView implements PluginValue {
 			this.view.dispatch({ effects: clearDraft.of(null) });
 		};
 
-		const cancelBtn = actions.createEl("button", {
-			cls: "dc-round dc-round--cancel",
-			attr: { "aria-label": "Cancel" },
-		});
-		setIcon(cancelBtn, "x");
-		cancelBtn.addEventListener("click", (e) => {
-			e.stopPropagation();
-			cancel();
-		});
-
 		const confirmBtn = actions.createEl("button", {
 			cls: "dc-round dc-round--confirm",
 			attr: { "aria-label": "Comment" },
@@ -304,7 +292,7 @@ class MarginView implements PluginValue {
 			if (e.key === "Escape") {
 				e.preventDefault();
 				cancel();
-			} else if (e.key === "Enter" && !e.shiftKey) {
+			} else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault();
 				submit();
 			}
@@ -365,6 +353,14 @@ class MarginView implements PluginValue {
 		const span = (e.target as HTMLElement).closest(".doc-comment-span");
 		const id = span?.getAttribute("data-cid");
 		if (id) this.setActive(id);
+	};
+
+	private onContentClick = (e: MouseEvent): void => {
+		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		if (!span || span.hasClass("dc-draft")) return;
+		const id = span?.getAttribute("data-cid");
+		if (id) this.view.state.facet(commentConfig).openInSidebar?.(id);
 	};
 
 	private onContentMouseOver = (e: MouseEvent): void => {

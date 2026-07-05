@@ -228,6 +228,9 @@ body {
 .dc-entry__text {
 	overflow-wrap: anywhere;
 	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-normal);
+	line-height: 1.55;
 }
 /* Comment text is Markdown-rendered: tighten block spacing so a one-line comment
    reads like plain text, and keep code / lists / quotes legible inside the card. */
@@ -239,11 +242,31 @@ body {
 }
 .dc-entry__text p {
 	margin: 0 0 0.4em;
+	white-space: pre-wrap;
+}
+.dc-entry__text h1,
+.dc-entry__text h2,
+.dc-entry__text h3,
+.dc-entry__text h4,
+.dc-entry__text h5,
+.dc-entry__text h6 {
+	margin: 0.45em 0 0.25em;
+	padding: 0;
+	border: none;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	line-height: 1.35;
+}
+.dc-entry__text strong {
+	font-weight: var(--font-semibold);
 }
 .dc-entry__text ul,
 .dc-entry__text ol {
 	margin: 0.2em 0;
 	padding-left: 1.4em;
+}
+.dc-entry__text code {
+	font-size: 0.92em;
 }
 .dc-entry__text pre {
 	margin: 0.4em 0;
@@ -459,13 +482,24 @@ body {
 	border-bottom-color: var(--interactive-accent);
 }
 
-/* ── "All discussions" sidebar panel ───────────────────────────────────── */
+/* ── Synced right sidebar panel ─────────────────────────────────────────── */
+.dc-sidebar-view {
+	display: flex;
+	height: 100%;
+	min-height: 0;
+	flex-direction: column;
+	overflow: hidden;
+}
 .dc-sidebar__header {
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
 	padding-bottom: 8px;
 	border-bottom: 1px solid var(--background-modifier-border);
+}
+.dc-sidebar__header--simple {
+	flex: 0 0 auto;
+	margin-bottom: 8px;
 }
 .dc-sidebar__title {
 	overflow: hidden;
@@ -474,66 +508,100 @@ body {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-/* Segmented Open / Resolved / All status filter. */
-.dc-sidebar__tabs {
-	display: flex;
-	gap: 2px;
-	padding: 2px;
-	border-radius: var(--radius-m, 8px);
-	background-color: var(--background-secondary);
+
+.dc-follow-sidebar {
+	position: relative;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: hidden;
 }
-.dc-sidebar__tab {
-	display: inline-flex;
-	flex: 1;
+.dc-sidebar-track {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+}
+.dc-sidebar-track .doc-comment-card {
+	left: 8px;
+	right: 8px;
+	width: auto;
+	will-change: top;
+}
+.dc-sidebar-track .doc-comment-card.is-edge-top {
+	-webkit-mask-image: linear-gradient(to bottom, transparent, #000 22px);
+	mask-image: linear-gradient(to bottom, transparent, #000 22px);
+}
+.dc-sidebar-track .doc-comment-card.is-edge-bottom {
+	-webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+	mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+.dc-sidebar-track .doc-comment-card.is-edge-top.is-edge-bottom {
+	-webkit-mask-image: linear-gradient(to bottom, transparent, #000 22px, #000 calc(100% - 28px), transparent);
+	mask-image: linear-gradient(to bottom, transparent, #000 22px, #000 calc(100% - 28px), transparent);
+}
+.doc-comment-card.dc-sidebar-offscreen {
+	display: none;
+}
+.dc-sidebar-edge {
+	all: unset;
+	position: absolute;
+	left: 50%;
+	right: auto !important;
+	z-index: 6;
+	box-sizing: border-box;
+	display: flex;
 	align-items: center;
 	justify-content: center;
-	gap: 5px;
-	height: 26px;
-	padding: 0 6px;
-	border: none;
-	/* Concentric with the track: inner radius = outer radius − track padding (2px). */
-	border-radius: calc(var(--radius-m, 8px) - 2px);
-	background: transparent;
+	gap: 4px;
+	width: auto !important;
+	min-width: 42px;
+	max-width: calc(100% - 24px);
+	height: 20px;
+	padding: 0 9px;
+	transform: translateX(-50%);
+	border: 1px solid color-mix(in srgb, var(--background-modifier-border), transparent 55%);
+	border-radius: 999px;
+	background-color: color-mix(in srgb, var(--background-secondary), transparent 12%);
 	color: var(--text-muted);
-	font-size: var(--font-smaller);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-medium);
 	line-height: 1;
-	box-shadow: none;
+	white-space: nowrap;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
 	cursor: pointer;
+	backdrop-filter: blur(8px);
 }
-.dc-sidebar__tab:hover {
-	color: var(--text-normal);
-}
-.dc-sidebar__tab.is-active {
-	background-color: var(--background-primary);
-	color: var(--text-normal);
-	box-shadow: var(--shadow-s);
-}
-.dc-sidebar__tab-count {
+.dc-sidebar-edge::before {
 	color: var(--text-faint);
-	font-variant-numeric: tabular-nums;
+	font-size: 12px;
+	line-height: 1;
 }
-.dc-sidebar__tab.is-active .dc-sidebar__tab-count {
-	color: var(--text-muted);
+.dc-sidebar-edge:hover {
+	color: var(--text-normal);
+	border-color: var(--background-modifier-border-hover);
+	background-color: var(--background-modifier-hover);
 }
-
-.dc-sidebar {
-	display: flex;
-	flex-direction: column;
-	gap: var(--dc-card-gap, 8px);
-	/* Generous bottom room so the LAST card's reply field can scroll up clear of the
-	   bottom edge / status bar, with space to grow as you type. */
-	padding: 8px 0 50vh;
+.dc-sidebar-edge--top {
+	top: 6px;
 }
-/* The cards are the same component as the margin, just laid out in normal flow
-   (the margin pins them with an absolute `top`; here they stack). */
-.dc-sidebar .doc-comment-card {
-	position: static;
-	left: auto;
-	right: auto;
-	width: 100%;
+.dc-sidebar-edge--top::before {
+	content: "↑";
+}
+.dc-sidebar-edge--bottom {
+	bottom: 6px;
+}
+.dc-sidebar-edge--bottom::before {
+	content: "↓";
+}
+.dc-sidebar-edge.is-hidden {
+	display: none;
 }
 
 .dc-sidebar__empty {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	padding: 24px 8px;
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
@@ -561,4 +629,3 @@ body {
 	min-height: 5em;
 	resize: vertical;
 }
-

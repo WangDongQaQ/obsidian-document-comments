@@ -1,7 +1,7 @@
 {
-	"name": "document-comments",
+	"name": "aspen-document-comments",
 	"version": "0.1.0",
-	"description": "Notion-style margin comments for Obsidian, stored inline in markdown.",
+	"description": "Aspen's sidebar-following fork of Document Comments for Obsidian.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
@@ -18,7 +18,7 @@
 	"keywords": [
 		"obsidian-plugin"
 	],
-	"author": "Kyle McDonald",
+	"author": "Aspen",
 	"license": "MIT",
 	"devDependencies": {
 		"@codemirror/state": "^6.6.0",

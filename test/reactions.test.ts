@@ -48,6 +48,21 @@ describe("entry + reaction edits", () => {
 		expect(c.thread[1].text).toBe("second edited");
 	});
 
+	it("edits an entry to multiline text with a blank line", () => {
+		const text = [
+			"以 patagonia 马甲为例:",
+			"",
+			"信息 是我``关注环境``并且``我买得起500美元的马甲``",
+			"分发 是我``穿着这个马甲社交``",
+			"放大 在这里是``受物理空间限制导致难以构成有效的信号传递``",
+		].join("\n");
+		const out = applyChanges(base, computeEditEntry(base, "r1", 0, text).unwrap());
+		const c = parseComments(out)[0];
+		expect(c.thread).toHaveLength(2);
+		expect(c.thread[0].text).toBe(text);
+		expect(c.thread[1].text).toBe("second");
+	});
+
 	it("deletes a reply by index", () => {
 		const c = parseComments(applyChanges(base, computeDeleteEntry(base, "r1", 1).unwrap()))[0];
 		expect(c.thread).toHaveLength(1);

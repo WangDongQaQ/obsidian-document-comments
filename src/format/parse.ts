@@ -156,6 +156,11 @@ const parseBody = (block: string): { thread: ThreadEntry[]; reactions: Reaction[
 	const thread: ThreadEntry[] = [];
 	const reactions: Reaction[] = [];
 	for (const raw of block.split("\n")) {
+		if (/^\s/.test(raw) && thread.length > 0) {
+			const continuation = raw.startsWith("\t") ? raw.slice(1) : raw;
+			thread[thread.length - 1].text += "\n" + continuation.replace(/\s+$/, "");
+			continue;
+		}
 		const line = raw.replace(/\s+$/, "");
 		if (line.trim() === "") continue;
 

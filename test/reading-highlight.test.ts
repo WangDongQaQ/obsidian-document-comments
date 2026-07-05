@@ -6,12 +6,19 @@
 // replaces it with a nested-editor widget our mark decoration can't reach), but
 // Reading view walks the rendered DOM and *can*.
 import { describe, expect, test } from "vitest";
-import type { MarkdownPostProcessorContext } from "obsidian";
-import { highlightPostProcessor } from "../src/reading/highlight";
+import type { MarkdownPostProcessorContext, MarkdownView } from "obsidian";
+import { highlightPostProcessor, offsetToLineCh, sourceOffsetAtViewportCenter } from "../src/reading/highlight";
 
 // Minimal context: report the block's source + line span, like Obsidian does.
 const ctxFor = (text: string, lineStart: number, lineEnd: number): MarkdownPostProcessorContext =>
 	({ getSectionInfo: () => ({ text, lineStart, lineEnd }) }) as unknown as MarkdownPostProcessorContext;
+
+Object.defineProperty(Node.prototype, "instanceOf", {
+	value(this: Node, type: { new (): unknown }) {
+		return this instanceof type;
+	},
+	configurable: true,
+});
 
 describe("reading-view highlight post-processor", () => {
 	test("wraps a comment anchor in a paragraph", () => {
@@ -47,4 +54,56 @@ describe("reading-view highlight post-processor", () => {
 		// …and it lands in the right cell, not elsewhere in the table.
 		expect(span?.closest("td")?.textContent).toBe("Friday");
 	});
+
+	test("maps the reading viewport center back to a source offset", () => {
+		const doc = ["Top block", "", "Middle block", "", "Bottom block"].join("\n");
+		const root = document.createElement("div");
+		const scroller = document.createElement("div");
+		scroller.className = "markdown-preview-view";
+		const section = document.createElement("div");
+		const top = document.createElement("div");
+		const middle = document.createElement("div");
+		const bottom = document.createElement("div");
+		section.className = "markdown-preview-section";
+		scroller.appendChild(section);
+		section.append(top, middle, bottom);
+		top.textContent = "Top block";
+		middle.textContent = "Middle block";
+		bottom.textContent = "Bottom block";
+		root.appendChild(scroller);
+		document.body.appendChild(root);
+
+		setRect(scroller, 0, 200);
+		setRect(top, 0, 40);
+		setRect(middle, 80, 140);
+		setRect(bottom, 180, 220);
+		Object.defineProperty(scroller, "clientHeight", { value: 200 });
+
+		highlightPostProcessor(top, ctxFor(doc, 0, 0));
+		highlightPostProcessor(middle, ctxFor(doc, 2, 2));
+		highlightPostProcessor(bottom, ctxFor(doc, 4, 4));
+
+		const view = { containerEl: root } as unknown as MarkdownView;
+		expect(sourceOffsetAtViewportCenter(view)).toBeGreaterThanOrEqual(doc.indexOf("Middle"));
+		root.remove();
+	});
+
+	test("converts source offsets to line/ch pairs", () => {
+		expect(offsetToLineCh("aa\nbbb\nc", 5)).toEqual({ line: 1, ch: 2 });
+	});
 });
+
+const setRect = (el: HTMLElement, top: number, bottom: number): void => {
+	el.getBoundingClientRect = () =>
+		({
+			x: 0,
+			y: top,
+			top,
+			right: 0,
+			bottom,
+			left: 0,
+			width: 0,
+			height: bottom - top,
+			toJSON: () => ({}),
+		}) as DOMRect;
+};

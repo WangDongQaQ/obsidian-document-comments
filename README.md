@@ -1,22 +1,24 @@
-# Document Comments
+# Aspen Document Comments
 
-Notion / Linear-style **margin comments** for Obsidian — except the comments live **inside the markdown file**, stored as HTML comments. They render as floating cards in the right margin, but any other tool or AI agent that reads the raw `.md` sees them in context (a comment-free editor, a `git diff`, or an LLM all read the same thing).
+Aspen's sidebar-following fork of **Document Comments** for Obsidian. Comments still live **inside the markdown file**, stored as HTML comments, but the right sidebar behaves more like a Feishu-style sticky-note rail that follows the active document viewport.
+
+Forked from Kyle McDonald's Document Comments: <https://github.com/kylemcd/obsidian-document-comments>.
 
 ![Document Comments — threaded comment cards in the right margin of an Obsidian note](screenshot.png)
 
-> Available in Obsidian's **Community plugins** store, on **desktop and mobile** — see [Install](#install).
+> Local custom plugin id: `aspen-document-comments`.
 
 ## Features
 
 - **Inline storage.** Comments are plain HTML comments in the file — invisible in Reading view and in other markdown renderers, and legible to agents/tools that read the raw text.
 - **Margin cards** in Live Preview, Source, and Reading view, aligned to the highlighted text. Click a card to jump to its anchor; hover to light it up.
-- **Threads, resolve / reopen, emoji reactions, edit & delete** — every action is a plain edit to the markdown, so it round-trips cleanly.
+- **Threads, emoji reactions, edit & delete** — every action is a plain edit to the markdown, so it round-trips cleanly. The resolve/reopen button is removed in this fork.
 - **Markdown in comment text** — code spans, bold, links, lists, etc. render in the cards (margin and sidebar).
 - **Long comments collapse** to a *Show more* preview; a thread taller than the screen opens in the sidebar instead.
 - **Inline composer.** Select text → command or right-click → a draft card opens in the margin (no modal). On mobile, a small dialog takes its place.
-- **"All discussions" sidebar** — a panel listing the active note's comments with **Open / Resolved / All** filter tabs; while it's open the inline cards step aside (the in-text highlights stay).
+- **Following sidebar** — the right sidebar positions cards against the active note's viewport; off-screen comments collapse into `↑ N 个` / `↓ N 个` jump bars.
 - **Toggle comments** on/off (also hides the text highlights), and **hide resolved** comments by default.
-- **Mobile.** On phones and tablets the floating margin is turned off (there's no room for it): the in-text **highlights** still mark commented text, and you read, reply, and resolve through the **sidebar** panel — new comments are composed in a quick dialog. It's the same inline storage, so a note's comments are identical on desktop and mobile.
+- **Mobile.** On phones and tablets the floating margin is turned off (there's no room for it): the in-text **highlights** still mark commented text, and you read and reply through the **sidebar** panel — new comments are composed in a quick dialog. It's the same inline storage, so a note's comments are identical on desktop and mobile.
 
 ## How comments are stored
 
@@ -34,46 +36,31 @@ sam (2026-06-17T10:05:00.000Z): Thursday is better for QA.
 
 Requires **Obsidian 1.7.2 or newer** (desktop or mobile).
 
-### Community plugins (recommended)
-
-1. Open **Settings → Community plugins → Browse**.
-2. Search for **Document Comments**, click **Install**, then **Enable**.
-
-### BRAT — for pre-release builds
-
-1. Install **BRAT** (Settings → Community plugins → Browse → search "BRAT") and enable it.
-2. Run the command **BRAT: Add a beta plugin for testing** and enter:
-   `kylemcd/obsidian-document-comments`
-3. Enable **Document Comments** in Settings → Community plugins.
-
-BRAT installs from the latest GitHub release and updates it automatically when new ones ship.
-
 ### Manual
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/kylemcd/obsidian-document-comments/releases).
-2. Drop them in `<your-vault>/.obsidian/plugins/document-comments/` (create the folder).
-3. In Obsidian, reload (or restart), then enable **Document Comments** under Settings → Community plugins.
+1. Build locally with `npm run build`.
+2. Drop `main.js`, `manifest.json`, and `styles.css` into `<your-vault>/.obsidian/plugins/aspen-document-comments/`.
+3. Enable **Aspen Document Comments** under Settings → Community plugins.
 
 ### Build from source
 
 ```bash
-git clone https://github.com/kylemcd/obsidian-document-comments
-cd obsidian-document-comments
 npm install
 npm run build
 ```
 
 Then copy (or symlink) `main.js`, `manifest.json`, and `styles.css` into
-`<your-vault>/.obsidian/plugins/document-comments/` and enable the plugin.
+`<your-vault>/.obsidian/plugins/aspen-document-comments/` and enable the plugin.
 
 ## Usage
 
-- **Add a comment:** select text, then run **Add comment on selection** (command palette) or right-click → **Add comment**. Type in the margin card and press Enter (Shift+Enter for a newline).
-- **Reply / resolve / react / edit / delete:** hover a card to reveal its action bar, or use the ⋯ menu.
-- **Open the sidebar:** the *Open comments sidebar* ribbon icon or command.
-- **Show/hide comments and resolved:** the ribbon, or the *Toggle comments* / *Toggle resolved comments* commands.
+- **Add a comment:** select text, then run **Add comment on selection** (command palette) or right-click → **Add comment**. Enter adds a new line; click the check button or press Cmd/Ctrl+Enter to save.
+- **Reply / react / edit / delete:** hover a card to reveal its action bar, or use the ⋯ menu.
+- **Open or hide the sidebar:** use **Settings → Aspen Document Comments → Show comments sidebar**, run *Toggle comments sidebar*, or click highlighted commented text.
+- **Show/hide document highlights and inline notes:** use **Settings → Aspen Document Comments → Show comments**, or run *Toggle comments* from the command palette.
+- **Move between comments:** `Shift+↑` jumps to the previous comment; `Shift+↓` jumps to the next.
 
-Set the name attached to your comments under **Settings → Document Comments → Author**.
+Set the name attached to your comments under **Settings → Aspen Document Comments → Author**.
 
 ## Privacy
 

@@ -132,6 +132,30 @@ describe("serializeBody round-trip", () => {
 		expect(c.status).toBe("resolved");
 		expect(c.thread).toEqual(data.thread);
 	});
+
+	it("round-trips multiline markdown without splitting replies", () => {
+		const data: CommentData = {
+			author: "me",
+			status: "open",
+			thread: [
+				{
+					author: "me",
+					text: [
+						"## 小标题",
+						"",
+						"**加粗** 和 *斜体*",
+						"```ts",
+						'const name: string = "patagonia";',
+						"```",
+					].join("\n"),
+				},
+			],
+			reactions: [{ emoji: "👍", authors: ["me"] }],
+		};
+		const c = parseComments("<!--c:m1-->x<!--/c:m1-->\n" + serializeBody("m1", data))[0];
+		expect(c.thread).toEqual(data.thread);
+		expect(c.reactions).toEqual(data.reactions);
+	});
 });
 
 describe("generateId", () => {

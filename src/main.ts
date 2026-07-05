@@ -7,15 +7,21 @@ import { commentConfig } from "./editor/config";
 import { editorLayoutField } from "./editor/layout";
 import { draftField, setDraft } from "./editor/draft";
 import { addComment, insertCommentInFile } from "./editor/commands";
-import { findSectionRange, highlightPostProcessor } from "./reading/highlight";
+import {
+	findSectionRange,
+	highlightPostProcessor,
+	offsetToLineCh,
+	sourceOffsetAtViewportCenter,
+} from "./reading/highlight";
 import { ReadingDeps, ReadingMarginManager } from "./reading/margin";
 import { COMMENTS_VIEW_TYPE, CommentsSidebarView, SidebarDeps } from "./ui/sidebar";
 import { CommentModal } from "./ui/comment-modal";
 import { DEFAULT_SETTINGS, DocCommentsSettings, DocCommentsSettingTab } from "./settings";
+import { anchorRange, parseComments } from "./format/parse";
+import { cssEscape } from "./util/css";
 
 export default class DocCommentsPlugin extends Plugin {
 	settings: DocCommentsSettings = { ...DEFAULT_SETTINGS };
-	private ribbonIcon: HTMLElement | null = null;
 	private readingManager: ReadingMarginManager | null = null;
 	private scheduleReadingRefresh: () => void = () => {};
 	/** True while the "All discussions" sidebar panel is mounted. */
@@ -66,15 +72,17 @@ export default class DocCommentsPlugin extends Plugin {
 			getAuthor: () => this.authorName(),
 		};
 		this.registerView(COMMENTS_VIEW_TYPE, (leaf) => new CommentsSidebarView(leaf, sidebarDeps));
+		this.app.workspace.onLayoutReady(() => {
+			if (this.settings.showSidebar) void this.activateSidebar();
+			else this.closeSidebar();
+		});
 
 		this.registerMarkdownPostProcessor((el, ctx) => {
 			highlightPostProcessor(el, ctx);
 			this.scheduleReadingRefresh();
 		});
-		// layout-change / active-leaf-change fire for every way the panel shows or
-		// hides — open, close, collapse the dock, switch tabs — so the inline column
-		// follows the panel's real visibility instead of a mount flag that misses
-		// collapse/tab-switch.
+		// layout-change / active-leaf-change fire for panel creation/removal and tab
+		// switching, so the inline column follows whether the sidebar owns comments.
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => {
 				this.syncSidebarOpen();
@@ -124,16 +132,30 @@ export default class DocCommentsPlugin extends Plugin {
 		this.addCommand({
 			id: "open-comments-sidebar",
 			name: "Open comments sidebar",
-			callback: () => void this.activateSidebar(),
+			callback: () => void this.setSidebarVisible(true),
 		});
 
-		this.ribbonIcon = this.addRibbonIcon(
-			"message-square",
-			"Toggle document comments",
-			() => void this.toggleComments(),
-		);
-		this.updateRibbon();
-		this.addRibbonIcon("messages-square", "Open comments sidebar", () => void this.activateSidebar());
+		this.addCommand({
+			id: "toggle-comments-sidebar",
+			name: "Toggle comments sidebar",
+			callback: () => void this.setSidebarVisible(!this.isSidebarVisible()),
+		});
+
+		this.addCommand({
+			id: "previous-comment",
+			name: "Go to previous comment",
+			// eslint-disable-next-line obsidianmd/commands/no-default-hotkeys -- User asked for Shift+Up/Down comment navigation.
+			hotkeys: [{ modifiers: ["Shift"], key: "ArrowUp" }],
+			callback: () => this.navigateComment("previous"),
+		});
+
+		this.addCommand({
+			id: "next-comment",
+			name: "Go to next comment",
+			// eslint-disable-next-line obsidianmd/commands/no-default-hotkeys -- User asked for Shift+Up/Down comment navigation.
+			hotkeys: [{ modifiers: ["Shift"], key: "ArrowDown" }],
+			callback: () => this.navigateComment("next"),
+		});
 
 		this.registerEvent(
 			this.app.workspace.on("editor-menu", (menu, editor) => {
@@ -225,7 +247,6 @@ export default class DocCommentsPlugin extends Plugin {
 	private async toggleComments(): Promise<void> {
 		this.settings.showComments = !this.settings.showComments;
 		await this.saveSettings();
-		this.updateRibbon();
 		this.refreshEditors();
 		new Notice(this.settings.showComments ? "Comments shown" : "Comments hidden");
 	}
@@ -237,13 +258,12 @@ export default class DocCommentsPlugin extends Plugin {
 		new Notice(this.settings.showResolved ? "Resolved comments shown" : "Resolved comments hidden");
 	}
 
-	private updateRibbon(): void {
-		if (!this.ribbonIcon) return;
-		this.ribbonIcon.toggleClass("is-active", this.settings.showComments);
-		this.ribbonIcon.setAttribute(
-			"aria-label",
-			this.settings.showComments ? "Hide document comments" : "Show document comments",
-		);
+	async setSidebarVisible(show: boolean): Promise<void> {
+		this.settings.showSidebar = show;
+		await this.saveSettings();
+		if (show) await this.activateSidebar();
+		else this.closeSidebar();
+		this.refreshEditors();
 	}
 
 	/** Force open editors + reading views (+ the sidebar) to re-evaluate live config. */
@@ -274,11 +294,68 @@ export default class DocCommentsPlugin extends Plugin {
 		if (opened.isErr()) new Notice(`Couldn't open the comments sidebar: ${opened.error}`);
 	}
 
+	private closeSidebar(): void {
+		this.app.workspace.detachLeavesOfType(COMMENTS_VIEW_TYPE);
+		this.syncSidebarOpen();
+	}
+
 	/** Open the sidebar and scroll it to a thread — the escape from a margin card too
 	 *  tall to fit the column even when expanded. */
 	private async revealComment(id: string): Promise<void> {
-		await this.activateSidebar();
+		await this.setSidebarVisible(true);
 		await this.sidebarView()?.revealComment(id);
+	}
+
+	private navigateComment(direction: CommentDirection): void {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) {
+			new Notice("Open a note to navigate comments.");
+			return;
+		}
+		if (view.getMode() === "preview") {
+			void this.navigateReadingComment(view, direction);
+			return;
+		}
+		this.navigateEditorComment(view, direction);
+	}
+
+	private navigateEditorComment(view: MarkdownView, direction: CommentDirection): void {
+		const cm = editorView(view.editor);
+		if (!cm) return;
+		const targets = commentTargets(cm.state.doc.toString());
+		const target = pickTarget(targets, cm.state.selection.main.head, direction);
+		if (!target) {
+			new Notice("No comments in this note.");
+			return;
+		}
+		cm.dispatch({
+			selection: { anchor: target.pos },
+			effects: EditorView.scrollIntoView(target.pos, { y: "center" }),
+		});
+		window.setTimeout(() => {
+			const span = cm.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(target.id)}"]`);
+			if (span?.instanceOf(HTMLElement)) flashElement(span);
+		}, 80);
+	}
+
+	private async navigateReadingComment(view: MarkdownView, direction: CommentDirection): Promise<void> {
+		const file = view.file;
+		if (!file) return;
+		let doc: string;
+		try {
+			doc = await this.app.vault.read(file);
+		} catch {
+			new Notice("Couldn't read this note.");
+			return;
+		}
+		const targets = commentTargets(doc);
+		const current = sourceOffsetAtViewportCenter(view) ?? previewScrollOffset(view, doc);
+		const target = pickTarget(targets, current, direction);
+		if (!target) {
+			new Notice("No comments in this note.");
+			return;
+		}
+		scrollReadingTarget(view, doc, target);
 	}
 
 	/** The live sidebar view instance, if the panel is open. */
@@ -287,15 +364,17 @@ export default class DocCommentsPlugin extends Plugin {
 		return leaf?.view instanceof CommentsSidebarView ? leaf.view : null;
 	}
 
-	/** Recompute whether the comments panel is actually visible and, when that
-	 *  changes, refresh editors so the inline column steps aside / comes back.
-	 *  Visibility — not mere existence — is what matters: a collapsed dock or a
-	 *  hidden tab must bring the inline cards back. */
+	/** Recompute whether comments live in the sidebar and, when that changes,
+	 *  refresh editors so the inline column steps aside / comes back. */
 	private syncSidebarOpen(): void {
-		const open = this.isSidebarVisible();
+		const open = this.sidebarOwnsComments();
 		if (open === this.sidebarOpen) return;
 		this.sidebarOpen = open;
 		this.refreshEditors();
+	}
+
+	private sidebarOwnsComments(): boolean {
+		return this.settings.showSidebar && this.app.workspace.getLeavesOfType(COMMENTS_VIEW_TYPE).length > 0;
 	}
 
 	private isSidebarVisible(): boolean {
@@ -336,4 +415,79 @@ const editorView = (editor: Editor): EditorView | null => {
 
 const editorViewFromLeaf = (leaf: WorkspaceLeaf): EditorView | null => {
 	return leaf.view instanceof MarkdownView ? editorView(leaf.view.editor) : null;
+};
+
+type CommentDirection = "previous" | "next";
+type NavTarget = { id: string; pos: number };
+
+const commentTargets = (doc: string): NavTarget[] =>
+	parseComments(doc)
+		.map((c) => {
+			const range = anchorRange(c);
+			return range ? { id: c.id, pos: range.from } : null;
+		})
+		.filter((target): target is NavTarget => target !== null)
+		.sort((a, b) => a.pos - b.pos);
+
+const pickTarget = <T extends { pos: number }>(
+	targets: T[],
+	current: number,
+	direction: CommentDirection,
+): T | null => {
+	if (targets.length === 0) return null;
+	if (direction === "next") return targets.find((target) => target.pos > current + 1) ?? targets[0];
+	for (let i = targets.length - 1; i >= 0; i--) {
+		if (targets[i].pos < current - 1) return targets[i];
+	}
+	return targets[targets.length - 1];
+};
+
+const previewScrollOffset = (view: MarkdownView, doc: string): number => {
+	const scroller = view.containerEl.querySelector(".markdown-preview-view");
+	if (!(scroller instanceof HTMLElement)) return 0;
+	const max = scroller.scrollHeight - scroller.clientHeight;
+	return max > 0 ? Math.round((scroller.scrollTop / max) * doc.length) : 0;
+};
+
+const scrollReadingTarget = (view: MarkdownView, doc: string, target: NavTarget): void => {
+	const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(target.id)}"]`);
+	if (span instanceof HTMLElement) {
+		span.scrollIntoView({ block: "center", behavior: "smooth" });
+		flashElement(span);
+		return;
+	}
+
+	const loc = offsetToLineCh(doc, target.pos);
+	const scroller = view.containerEl.querySelector(".markdown-preview-view");
+	const before = scroller instanceof HTMLElement ? scroller.scrollTop : null;
+	view.setEphemeralState({ ...view.getEphemeralState(), line: loc.line });
+	try {
+		view.editor.scrollIntoView({ from: loc, to: loc }, true);
+	} catch {
+		// Preview mode may not expose a live editor facade.
+	}
+	if (scroller instanceof HTMLElement && before != null) {
+		window.setTimeout(() => {
+			if (Math.abs(scroller.scrollTop - before) > 2) return;
+			const max = scroller.scrollHeight - scroller.clientHeight;
+			if (max > 0) scroller.scrollTo({ top: (target.pos / Math.max(doc.length, 1)) * max, behavior: "smooth" });
+		}, 40);
+	}
+
+	let flashed = false;
+	const retry = (): void => {
+		if (flashed) return;
+		const rendered = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(target.id)}"]`);
+		if (!(rendered instanceof HTMLElement)) return;
+		rendered.scrollIntoView({ block: "center", behavior: "smooth" });
+		flashElement(rendered);
+		flashed = true;
+	};
+	window.setTimeout(retry, 220);
+	window.setTimeout(retry, 650);
+};
+
+const flashElement = (el: HTMLElement): void => {
+	el.addClass("dc-flash");
+	window.setTimeout(() => el.removeClass("dc-flash"), 900);
 };

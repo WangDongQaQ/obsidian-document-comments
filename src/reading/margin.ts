@@ -42,6 +42,7 @@ class ReadingMargin {
 	private draft: { from: number; to: number } | null = null;
 	private draftEl: HTMLElement | null = null;
 	private draftAnchor: HTMLElement | null = null;
+	private draftOutside: ((e: MouseEvent) => void) | null = null;
 	private cb: CardCallbacks;
 	private scrollHandler = () => this.position();
 	private resizeObserver: ResizeObserver;
@@ -85,6 +86,7 @@ class ReadingMargin {
 		this.readingView.addEventListener("mouseover", this.onMouseOver);
 		this.readingView.addEventListener("mouseout", this.onMouseOut);
 		this.readingView.addEventListener("mousedown", this.onMouseDown);
+		this.readingView.addEventListener("click", this.onClick);
 	}
 
 	async refresh(text?: string): Promise<void> {
@@ -203,6 +205,11 @@ class ReadingMargin {
 		this.draft = { from, to };
 		this.draftEl = this.buildDraftEl();
 		this.container.appendChild(this.draftEl);
+		this.draftOutside = (e: MouseEvent) => {
+			if (!this.draftEl || this.draftEl.contains(e.target as Node)) return;
+			this.clearDraft();
+		};
+		this.scroller.ownerDocument.addEventListener("mousedown", this.draftOutside, true);
 		this.position();
 		window.setTimeout(() => {
 			const ta = this.draftEl?.querySelector("textarea");
@@ -226,16 +233,6 @@ class ReadingMargin {
 			if (text && draft) void this.insertComment(draft.from, draft.to, text);
 		};
 
-		const cancelBtn = actions.createEl("button", {
-			cls: "dc-round dc-round--cancel",
-			attr: { "aria-label": "Cancel" },
-		});
-		setIcon(cancelBtn, "x");
-		cancelBtn.addEventListener("click", (e) => {
-			e.stopPropagation();
-			this.clearDraft();
-		});
-
 		const confirmBtn = actions.createEl("button", {
 			cls: "dc-round dc-round--confirm",
 			attr: { "aria-label": "Comment" },
@@ -250,7 +247,7 @@ class ReadingMargin {
 			if (e.key === "Escape") {
 				e.preventDefault();
 				this.clearDraft();
-			} else if (e.key === "Enter" && !e.shiftKey) {
+			} else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault();
 				submit();
 			}
@@ -288,6 +285,10 @@ class ReadingMargin {
 	}
 
 	private clearDraft(): void {
+		if (this.draftOutside) {
+			this.scroller.ownerDocument.removeEventListener("mousedown", this.draftOutside, true);
+			this.draftOutside = null;
+		}
 		if (this.draftAnchor) {
 			// Unwrap the temp highlight span, restoring the original text nodes.
 			const parent = this.draftAnchor.parentNode;
@@ -385,6 +386,14 @@ class ReadingMargin {
 		if (id) this.setActive(id);
 	};
 
+	private onClick = (e: MouseEvent): void => {
+		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+		const span = (e.target as HTMLElement).closest(".doc-comment-span");
+		if (!span || span.hasClass("dc-draft")) return;
+		const id = span?.getAttribute("data-cid");
+		if (id) this.deps.openInSidebar?.(id);
+	};
+
 	destroy(): void {
 		this.clearDraft();
 		this.scroller.removeEventListener("scroll", this.scrollHandler);
@@ -392,6 +401,7 @@ class ReadingMargin {
 		this.readingView.removeEventListener("mouseover", this.onMouseOver);
 		this.readingView.removeEventListener("mouseout", this.onMouseOut);
 		this.readingView.removeEventListener("mousedown", this.onMouseDown);
+		this.readingView.removeEventListener("click", this.onClick);
 		// The container we own goes away; the state classes sit on Obsidian's
 		// reading-view element, so clear them explicitly to avoid leaving it capped.
 		this.readingView.removeClasses(["dc-has", "dc-highlights", "dc-hide-resolved"]);

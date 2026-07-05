@@ -1,4 +1,4 @@
-import { MarkdownPostProcessorContext } from "obsidian";
+import { MarkdownPostProcessorContext, type MarkdownView } from "obsidian";
 import { ParsedComment } from "../format/types";
 import { anchorRange, parseComments } from "../format/parse";
 
@@ -15,6 +15,43 @@ export const findSectionRange = (node: Node): { from: number; source: string } |
 		el = el.parentElement;
 	}
 	return null;
+};
+
+export const sourceOffsetAtViewportCenter = (view: MarkdownView): number | null => {
+	const scroller = view.containerEl.querySelector(".markdown-preview-view");
+	if (!(scroller instanceof HTMLElement)) return null;
+	const viewport = scroller.getBoundingClientRect();
+	const center = viewport.top + viewport.height / 2;
+	const section = scroller.querySelector(".markdown-preview-section");
+	const root = section?.instanceOf(HTMLElement) ? section : scroller;
+	const blocks = Array.from(root.children).filter((el): el is HTMLElement => el.instanceOf(HTMLElement));
+	let best: { distance: number; offset: number } | null = null;
+
+	for (const el of blocks) {
+		const range = findSectionRange(el);
+		if (!range) continue;
+		const rect = el.getBoundingClientRect();
+		if (rect.bottom < viewport.top || rect.top > viewport.bottom) continue;
+		const distance = center < rect.top ? rect.top - center : center > rect.bottom ? center - rect.bottom : 0;
+		const ratio = rect.height > 0 ? clamp((center - rect.top) / rect.height, 0, 1) : 0;
+		const offset = range.from + Math.round(range.source.length * ratio);
+		if (!best || distance < best.distance) best = { distance, offset };
+	}
+
+	return best?.offset ?? null;
+};
+
+export const offsetToLineCh = (text: string, offset: number): { line: number; ch: number } => {
+	let line = 0;
+	let lineStart = 0;
+	const limit = Math.max(0, Math.min(offset, text.length));
+	for (let i = 0; i < limit; i++) {
+		if (text.charCodeAt(i) === 10) {
+			line++;
+			lineStart = i + 1;
+		}
+	}
+	return { line, ch: limit - lineStart };
 };
 
 // Parsing the whole file per rendered block would be wasteful, so cache the last
@@ -64,6 +101,8 @@ const offsetOfLine = (lines: string[], lineNo: number): number => {
 	for (let i = 0; i < lineNo && i < lines.length; i++) offset += lines[i].length + 1;
 	return offset;
 };
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
 /** Wrap the first single-text-node occurrence of `needle` in a highlight span.
  *  Uses the element's own document so it works in pop-out windows too. */

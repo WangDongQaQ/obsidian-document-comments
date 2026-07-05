@@ -1,9 +1,9 @@
 {
-	"id": "document-comments",
-	"name": "Document Comments",
+	"id": "aspen-document-comments",
+	"name": "Aspen Document Comments",
 	"version": "0.1.4",
 	"minAppVersion": "1.7.2",
-	"description": "Notion-style margin comments stored inline in your markdown, so agents and other tools can read them too.",
-	"author": "Kyle McDonald",
+	"description": "Aspen's sidebar-following fork of Kyle McDonald's Document Comments (https://github.com/kylemcd/obsidian-document-comments).",
+	"author": "Aspen",
 	"isDesktopOnly": false
 }

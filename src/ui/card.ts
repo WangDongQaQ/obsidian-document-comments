@@ -244,13 +244,8 @@ export class Card {
 		const row = parent.createDiv("dc-entry");
 
 		const bar = row.createDiv("dc-entry__bar");
+		this.iconButton(bar, "pencil", "Edit", () => this.startEdit(i));
 		this.iconButton(bar, "smile-plus", "React", (e) => this.openReactionPicker(e.currentTarget as HTMLElement));
-		if (i === 0) {
-			const resolved = this.comment.status === "resolved";
-			this.iconButton(bar, resolved ? "rotate-ccw" : "check", resolved ? "Reopen" : "Resolve", () =>
-				this.cb.setResolved(this.id, !resolved),
-			);
-		}
 		this.iconButton(bar, "more-horizontal", "More", (e) => this.openMoreMenu(e, i));
 
 		const head = row.createDiv("dc-entry__head");
@@ -301,7 +296,7 @@ export class Card {
 		ta.addEventListener("input", () => autogrow(ta));
 		ta.addEventListener("keydown", (e) => {
 			if (e.key === "Escape") this.cancelEdit();
-			else if (e.key === "Enter" && !e.shiftKey) {
+			else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault();
 				this.commitEdit(index, ta.value);
 			}
@@ -337,7 +332,7 @@ export class Card {
 			autogrow(ta);
 		});
 		ta.addEventListener("keydown", (e) => {
-			if (e.key === "Enter" && !e.shiftKey) {
+			if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault();
 				this.submitReply();
 			}
@@ -375,12 +370,6 @@ export class Card {
 
 	private openMoreMenu(e: MouseEvent, index: number): void {
 		const menu = new Menu();
-		menu.addItem((item) =>
-			item
-				.setTitle("Edit")
-				.setIcon("pencil")
-				.onClick(() => this.startEdit(index)),
-		);
 		menu.addItem((item) =>
 			item
 				.setTitle(index === 0 ? "Delete comment" : "Delete reply")

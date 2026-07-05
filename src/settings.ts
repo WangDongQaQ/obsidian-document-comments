@@ -6,6 +6,8 @@ export type DocCommentsSettings = {
 	author: string;
 	/** Master toggle for the margin column. */
 	showComments: boolean;
+	/** Keep the synced right sidebar open. */
+	showSidebar: boolean;
 	/** Show resolved comments in the margin. */
 	showResolved: boolean;
 };
@@ -13,6 +15,7 @@ export type DocCommentsSettings = {
 export const DEFAULT_SETTINGS: DocCommentsSettings = {
 	author: "",
 	showComments: true,
+	showSidebar: true,
 	showResolved: false,
 };
 
@@ -43,12 +46,21 @@ export class DocCommentsSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Show comments")
-			.setDesc("Show the comment column. You can also toggle this from the ribbon or the command palette.")
+			.setDesc("Show comment highlights and inline sticky notes.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.showComments).onChange(async (value) => {
 					this.plugin.settings.showComments = value;
 					await this.plugin.saveSettings();
 					this.plugin.refreshEditors();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Show comments sidebar")
+			.setDesc("Open the synced comment rail in the right sidebar.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.showSidebar).onChange(async (value) => {
+					await this.plugin.setSidebarVisible(value);
 				}),
 			);
 
