@@ -275,8 +275,7 @@ export class CommentsSidebarView extends ItemView {
 		const view = this.markdownViewForFile(file);
 		if (!view) return null;
 		if (view.getMode() === "preview") {
-			const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(c.id)}"]`);
-			return span instanceof HTMLElement ? span.getBoundingClientRect().top : null;
+			return this.previewSpan(view, c.id)?.getBoundingClientRect().top ?? null;
 		}
 		const cm = this.editorViewForFile(file);
 		if (!cm) return null;
@@ -375,8 +374,8 @@ export class CommentsSidebarView extends ItemView {
 	}
 
 	private revealPreviewSpan(view: MarkdownView, id: string): boolean {
-		const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
-		if (!(span instanceof HTMLElement)) return false;
+		const span = this.previewSpan(view, id);
+		if (!span) return false;
 		span.scrollIntoView({ block: "center", behavior: "smooth" });
 		this.flash(span);
 		window.setTimeout(() => this.position(), 220);
@@ -429,9 +428,10 @@ export class CommentsSidebarView extends ItemView {
 		if (!file) return;
 		const view = this.markdownViewForFile(file);
 		if (!view) return;
-		view.containerEl
-			.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`)
-			.forEach((s) => s.classList.toggle("is-active", active));
+		const root = view.getMode() === "preview" ? (this.previewScroller(view) ?? view.containerEl) : view.containerEl;
+		root.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`).forEach((s) =>
+			s.classList.toggle("is-active", active),
+		);
 	}
 
 	private flash(span: HTMLElement): void {
@@ -474,11 +474,18 @@ export class CommentsSidebarView extends ItemView {
 		if (!file) return null;
 		const view = this.markdownViewForFile(file);
 		if (!view) return null;
-		if (view.getMode() === "preview") {
-			const scroller = view.containerEl.querySelector(".markdown-preview-view");
-			return scroller instanceof HTMLElement ? scroller : null;
-		}
+		if (view.getMode() === "preview") return this.previewScroller(view);
 		return this.editorViewForFile(file)?.scrollDOM ?? null;
+	}
+
+	private previewSpan(view: MarkdownView, id: string): HTMLElement | null {
+		const span = this.previewScroller(view)?.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		return span instanceof HTMLElement ? span : null;
+	}
+
+	private previewScroller(view: MarkdownView): HTMLElement | null {
+		const scroller = view.containerEl.querySelector(".markdown-preview-view");
+		return scroller instanceof HTMLElement ? scroller : null;
 	}
 
 	private resolveFile(): TFile | null {

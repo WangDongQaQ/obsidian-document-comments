@@ -443,23 +443,23 @@ const pickTarget = <T extends { pos: number }>(
 };
 
 const previewScrollOffset = (view: MarkdownView, doc: string): number => {
-	const scroller = view.containerEl.querySelector(".markdown-preview-view");
-	if (!(scroller instanceof HTMLElement)) return 0;
+	const scroller = previewScroller(view);
+	if (!scroller) return 0;
 	const max = scroller.scrollHeight - scroller.clientHeight;
 	return max > 0 ? Math.round((scroller.scrollTop / max) * doc.length) : 0;
 };
 
 const scrollReadingTarget = (view: MarkdownView, doc: string, target: NavTarget): void => {
-	const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(target.id)}"]`);
-	if (span instanceof HTMLElement) {
+	const span = previewSpan(view, target.id);
+	if (span) {
 		span.scrollIntoView({ block: "center", behavior: "smooth" });
 		flashElement(span);
 		return;
 	}
 
 	const loc = offsetToLineCh(doc, target.pos);
-	const scroller = view.containerEl.querySelector(".markdown-preview-view");
-	const before = scroller instanceof HTMLElement ? scroller.scrollTop : null;
+	const scroller = previewScroller(view);
+	const before = scroller?.scrollTop ?? null;
 	view.setEphemeralState({ ...view.getEphemeralState(), line: loc.line });
 	try {
 		view.editor.scrollIntoView({ from: loc, to: loc }, true);
@@ -477,14 +477,24 @@ const scrollReadingTarget = (view: MarkdownView, doc: string, target: NavTarget)
 	let flashed = false;
 	const retry = (): void => {
 		if (flashed) return;
-		const rendered = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(target.id)}"]`);
-		if (!(rendered instanceof HTMLElement)) return;
+		const rendered = previewSpan(view, target.id);
+		if (!rendered) return;
 		rendered.scrollIntoView({ block: "center", behavior: "smooth" });
 		flashElement(rendered);
 		flashed = true;
 	};
 	window.setTimeout(retry, 220);
 	window.setTimeout(retry, 650);
+};
+
+const previewSpan = (view: MarkdownView, id: string): HTMLElement | null => {
+	const span = previewScroller(view)?.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+	return span instanceof HTMLElement ? span : null;
+};
+
+const previewScroller = (view: MarkdownView): HTMLElement | null => {
+	const scroller = view.containerEl.querySelector(".markdown-preview-view");
+	return scroller instanceof HTMLElement ? scroller : null;
 };
 
 const flashElement = (el: HTMLElement): void => {
