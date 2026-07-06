@@ -500,9 +500,19 @@ export class CommentsSidebarView extends ItemView {
 	}
 
 	private editorViewForFile(file: TFile): EditorView | null {
+		const active = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (active?.file?.path === file.path && active.getMode() !== "preview") {
+			const cm = (active.editor as unknown as { cm?: unknown }).cm;
+			if (cm instanceof EditorView) return cm;
+		}
 		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
 			const v = leaf.view;
-			if (v instanceof MarkdownView && v.file?.path === file.path && v.getMode() !== "preview") {
+			if (
+				v instanceof MarkdownView &&
+				v.file?.path === file.path &&
+				v.getMode() !== "preview" &&
+				this.isVisibleView(v)
+			) {
 				const cm = (v.editor as unknown as { cm?: unknown }).cm;
 				if (cm instanceof EditorView) return cm;
 			}
@@ -511,10 +521,23 @@ export class CommentsSidebarView extends ItemView {
 	}
 
 	private markdownViewForFile(file: TFile): MarkdownView | null {
+		const active = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (active?.file?.path === file.path) return active;
+		const recent = this.app.workspace.getMostRecentLeaf()?.view;
+		if (recent instanceof MarkdownView && recent.file?.path === file.path && this.isVisibleView(recent))
+			return recent;
+		let fallback: MarkdownView | null = null;
 		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
 			const v = leaf.view;
-			if (v instanceof MarkdownView && v.file?.path === file.path) return v;
+			if (!(v instanceof MarkdownView) || v.file?.path !== file.path) continue;
+			if (this.isVisibleView(v)) return v;
+			fallback ??= v;
 		}
-		return null;
+		return fallback;
+	}
+
+	private isVisibleView(view: MarkdownView): boolean {
+		const box = view.containerEl.getBoundingClientRect();
+		return view.containerEl.isConnected && box.width > 0 && box.height > 0;
 	}
 }
